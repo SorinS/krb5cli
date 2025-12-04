@@ -169,6 +169,10 @@ func (c *darwinCCache) call(req *kcmRequest) (*kcmReply, error) {
 
 	data, err := c.transport.Call(req.buf.Bytes())
 	if err != nil {
+		// Check if this is a KCMError (error code returned by KCM daemon)
+		if kcmErr, ok := err.(*KCMError); ok {
+			return nil, mapKCMError(kcmErr.Code)
+		}
 		return nil, err
 	}
 
@@ -179,28 +183,29 @@ func (c *darwinCCache) call(req *kcmRequest) (*kcmReply, error) {
 
 	reply := &kcmReply{data: data}
 
-	// Read and check the status code
-	code, err := reply.readUint32()
-	if err != nil {
-		// If we can't read the status code, the reply might be too short
-		// This typically means no credentials or communication error
-		if len(data) < 4 {
-			return nil, fmt.Errorf("no Kerberos credentials available - you may need to run 'kinit' or join a Kerberos realm")
-		}
-		return nil, errKCMMalformedReply
-	}
-	if code != 0 {
-		return nil, mapKCMError(code)
-	}
+	// The reply data doesn't include a status code - that's already handled by the transport
+	// The data here is the actual payload from KCM
 
 	return reply, nil
 }
 
 // mapKCMError maps a KCM error code to a Go error
-func mapKCMError(code uint32) error {
+// Note: error codes can be signed (negative) from Heimdal
+func mapKCMError(code int32) error {
 	switch code {
 	case 0:
 		return nil
+	case -304:
+		// Heimdal KRB5_CC_NOTFOUND or similar
+		return ErrCacheNotFound
+	case 101:
+		// KRB5_FCC_NOFILE - Credentials cache file not found
+		return ErrCacheNotFound
+	}
+
+	// Convert to unsigned for comparison with MIT krb5 error codes
+	ucode := uint32(code)
+	switch ucode {
 	case krb5ErrNoCreds, heimdalErrNoCreds:
 		return ErrCredNotFound
 	case krb5ErrCCNotFound:
@@ -216,7 +221,7 @@ func mapKCMError(code uint32) error {
 	case krb5ErrCCNotInitialized:
 		return fmt.Errorf("credential cache not initialized - no Kerberos tickets available (try running 'kinit')")
 	default:
-		return fmt.Errorf("kcm error: %d (0x%x)", code, code)
+		return fmt.Errorf("kcm error: %d (0x%x)", code, ucode)
 	}
 }
 

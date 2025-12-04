@@ -343,6 +343,15 @@ import (
 	"unsafe"
 )
 
+// KCMError represents an error returned by the KCM daemon
+type KCMError struct {
+	Code int32
+}
+
+func (e *KCMError) Error() string {
+	return fmt.Sprintf("kcm error: %d", e.Code)
+}
+
 // MachTransport implements KCMTransport using Mach RPC
 type MachTransport struct {
 	serviceName string
@@ -447,6 +456,9 @@ func (t *MachTransport) Call(request []byte) ([]byte, error) {
 		if result != 0 {
 			return nil, fmt.Errorf("KCM RPC failed after reconnect: %d", result)
 		}
+	} else if result == -3 {
+		// KCM returned an error code - return it as a KCMError so it can be mapped
+		return nil, &KCMError{Code: int32(returnCode)}
 	} else if result != 0 {
 		return nil, fmt.Errorf("KCM RPC failed: %d (return_code=%d)", result, returnCode)
 	}
