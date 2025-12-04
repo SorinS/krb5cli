@@ -91,6 +91,21 @@ var (
 	errKCMCacheNotFound  = errors.New("kcm: cache not found")
 )
 
+// Known Kerberos/KCM error codes (from MIT krb5 and Heimdal)
+const (
+	// KRB5 error codes
+	krb5ErrNoCreds          uint32 = 2529639107 // KRB5_CC_NOTFOUND - Matching credential not found
+	krb5ErrCCNotFound       uint32 = 2529639053 // KRB5_FCC_NOFILE - Credential cache file not found
+	krb5ErrCCEnd            uint32 = 2529639106 // KRB5_CC_END - End of credential cache reached
+	krb5ErrCCNoSupport      uint32 = 2529639141 // KRB5_CC_NOSUPP - Credential cache type not supported
+	krb5ErrCCBadName        uint32 = 2529639109 // KRB5_CC_BADNAME - Invalid credential cache name
+	krb5ErrCCUnknownType    uint32 = 2529639108 // KRB5_CC_UNKNOWN_TYPE - Unknown credential cache type
+	krb5ErrCCNotInitialized uint32 = 2529639110 // KRB5_CC_NOT_KTYPE - Cache not initialized
+
+	// Heimdal-specific error codes
+	heimdalErrNoCreds uint32 = 1765328243 // No credentials found
+)
+
 // kcmTransport is the interface for KCM communication backends
 type kcmTransport interface {
 	Connect() error
@@ -156,11 +171,21 @@ func (c *darwinCCache) call(req *kcmRequest) (*kcmReply, error) {
 		return nil, err
 	}
 
+	// Check for empty reply (no KCM daemon or no credentials)
+	if len(data) == 0 {
+		return nil, fmt.Errorf("no response from credential cache - Kerberos may not be configured on this system")
+	}
+
 	reply := &kcmReply{data: data}
 
 	// Read and check the status code
 	code, err := reply.readUint32()
 	if err != nil {
+		// If we can't read the status code, the reply might be too short
+		// This typically means no credentials or communication error
+		if len(data) < 4 {
+			return nil, fmt.Errorf("no Kerberos credentials available - you may need to run 'kinit' or join a Kerberos realm")
+		}
 		return nil, errKCMMalformedReply
 	}
 	if code != 0 {
@@ -175,8 +200,22 @@ func mapKCMError(code uint32) error {
 	switch code {
 	case 0:
 		return nil
+	case krb5ErrNoCreds, heimdalErrNoCreds:
+		return ErrCredNotFound
+	case krb5ErrCCNotFound:
+		return ErrCacheNotFound
+	case krb5ErrCCEnd:
+		return ErrCredNotFound
+	case krb5ErrCCNoSupport:
+		return fmt.Errorf("credential cache type not supported")
+	case krb5ErrCCBadName:
+		return fmt.Errorf("invalid credential cache name")
+	case krb5ErrCCUnknownType:
+		return fmt.Errorf("unknown credential cache type")
+	case krb5ErrCCNotInitialized:
+		return fmt.Errorf("credential cache not initialized - no Kerberos tickets available (try running 'kinit')")
 	default:
-		return fmt.Errorf("kcm error: %d", code)
+		return fmt.Errorf("kcm error: %d (0x%x)", code, code)
 	}
 }
 
@@ -546,9 +585,22 @@ func (r *kcmReply) readUint32() (uint32, error) {
 
 // readString reads a null-terminated string
 func (r *kcmReply) readString() (string, error) {
+	// Check if we have any data remaining
+	if r.pos >= len(r.data) {
+		return "", ErrCacheNotFound
+	}
+
 	end := bytes.IndexByte(r.data[r.pos:], 0)
 	if end < 0 {
-		return "", errKCMMalformedReply
+		// No null terminator - the remaining data might be the string
+		// or there might be no string at all
+		if r.pos == len(r.data) {
+			return "", ErrCacheNotFound
+		}
+		// Return the remaining data as the string
+		s := string(r.data[r.pos:])
+		r.pos = len(r.data)
+		return s, nil
 	}
 	s := string(r.data[r.pos : r.pos+end])
 	r.pos += end + 1

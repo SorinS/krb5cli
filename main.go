@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -35,7 +36,7 @@ func listCredentials(cacheName string) error {
 	// Create platform-specific credential cache client
 	cc, err := NewCCache()
 	if err != nil {
-		return fmt.Errorf("failed to open credential cache: %w", err)
+		return fmt.Errorf("failed to open credential cache: %w\n\nThis may indicate that the Kerberos credential cache service is not running\nor that you are not logged into a Kerberos realm.", err)
 	}
 	defer cc.Close()
 
@@ -43,6 +44,14 @@ func listCredentials(cacheName string) error {
 	if cacheName == "" {
 		cacheName, err = cc.GetDefaultCacheName()
 		if err != nil {
+			if err == ErrCacheNotFound || err == ErrCredNotFound {
+				return fmt.Errorf("no Kerberos credentials found.\n\nYou may need to authenticate first using 'kinit' or log into a Kerberos-enabled domain.")
+			}
+			// Check for common "no Kerberos" scenarios
+			errStr := err.Error()
+			if strings.Contains(errStr, "no response") || strings.Contains(errStr, "not configured") {
+				return fmt.Errorf("no Kerberos credentials available.\n\nKerberos does not appear to be configured on this system.\nOn macOS, this typically requires joining an Active Directory domain or running 'kinit'.")
+			}
 			return fmt.Errorf("failed to get default cache name: %w", err)
 		}
 	}
@@ -52,6 +61,9 @@ func listCredentials(cacheName string) error {
 	// Open the cache
 	cache, err := cc.OpenCache(cacheName)
 	if err != nil {
+		if err == ErrCacheNotFound {
+			return fmt.Errorf("credential cache not found: %s\n\nThe specified cache does not exist or has been destroyed.", cacheName)
+		}
 		return fmt.Errorf("failed to open cache: %w", err)
 	}
 	defer cache.Close()
@@ -59,6 +71,9 @@ func listCredentials(cacheName string) error {
 	// Get the principal
 	princ, realm, err := cache.GetPrincipal()
 	if err != nil {
+		if err == ErrCacheNotFound || err == ErrCredNotFound {
+			return fmt.Errorf("no Kerberos credentials found in cache.\n\nYou may need to authenticate first using 'kinit' or log into a Kerberos-enabled domain.")
+		}
 		return fmt.Errorf("failed to get principal: %w", err)
 	}
 
