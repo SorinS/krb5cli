@@ -53,28 +53,39 @@ typedef struct {
     mach_msg_type_number_t requestout_count;
 } kcm_request_msg_t;
 
-// Reply message structure matching MIG-generated __Reply__k5_kcmrpc_call_t
-// From kcmrpc.defs:
-//   out returnvalue: int;
-//   out replyin: k5_kcm_inband_msg;
-//   out replyout: k5_kcm_outband_msg, dealloc);
+// Reply message structure - MIG generates different layouts for simple vs complex replies
+// Simple reply (no OOL data): header + NDR + returnvalue + replyin_count + replyin + replyout_count
+// Complex reply (has OOL data): header + body + ool_descriptor + NDR + returnvalue + replyin_count + replyin + replyout_count
+
+// Simple reply structure (when replyout is empty)
 typedef struct {
     mach_msg_header_t header;
-    // Complex message body (because of OOL descriptor for replyout)
-    mach_msg_body_t body;
-    // Out-of-line descriptor for replyout
-    mach_msg_ool_descriptor_t replyout;
-    // NDR record
     NDR_record_t NDR;
-    // Return value (int32)
     int32_t returnvalue;
-    // In-band reply count and data
     mach_msg_type_number_t replyin_count;
     char replyin[KCM_MAX_INBAND_SIZE];
-    // Out-of-line reply count
     mach_msg_type_number_t replyout_count;
-    // Trailer
     mach_msg_trailer_t trailer;
+} kcm_reply_simple_t;
+
+// Complex reply structure (when replyout has data)
+typedef struct {
+    mach_msg_header_t header;
+    mach_msg_body_t body;
+    mach_msg_ool_descriptor_t replyout;
+    NDR_record_t NDR;
+    int32_t returnvalue;
+    mach_msg_type_number_t replyin_count;
+    char replyin[KCM_MAX_INBAND_SIZE];
+    mach_msg_type_number_t replyout_count;
+    mach_msg_trailer_t trailer;
+} kcm_reply_complex_t;
+
+// Union to receive either type of reply
+typedef union {
+    mach_msg_header_t header;
+    kcm_reply_simple_t simple;
+    kcm_reply_complex_t complex;
 } kcm_reply_msg_t;
 
 // Connect to the KCM service via bootstrap
@@ -222,28 +233,48 @@ int kcm_mach_call(mach_port_t port,
         fprintf(stderr, "\n");
     }
 
-    // Reply is always complex (has OOL descriptor per MIG definition)
-    // Extract the return value and reply data
-    int32_t retcode = reply.returnvalue;
+    // Extract the return value and reply data based on message type
+    int32_t retcode;
     const void *data = NULL;
     size_t len = 0;
+    mach_msg_type_number_t replyin_count;
+    mach_msg_type_number_t replyout_count;
+    void *replyout_address = NULL;
 
-    if (debug) {
-        fprintf(stderr, "DEBUG: returnvalue=%d, replyin_count=%d, replyout_count=%d\n",
-                retcode, reply.replyin_count, reply.replyout_count);
-        if (reply.replyout_count > 0) {
-            fprintf(stderr, "DEBUG: replyout.address=%p, replyout.size=%d\n",
-                    reply.replyout.address, reply.replyout.size);
+    if (is_complex) {
+        // Complex reply with OOL descriptor
+        retcode = reply.complex.returnvalue;
+        replyin_count = reply.complex.replyin_count;
+        replyout_count = reply.complex.replyout_count;
+        replyout_address = reply.complex.replyout.address;
+
+        if (debug) {
+            fprintf(stderr, "DEBUG: Complex reply: returnvalue=%d, replyin_count=%d, replyout_count=%d\n",
+                    retcode, replyin_count, replyout_count);
         }
-    }
 
-    // Check for OOL reply first, then in-band
-    if (reply.replyout_count > 0 && reply.replyout.address != NULL) {
-        data = reply.replyout.address;
-        len = reply.replyout_count;
-    } else if (reply.replyin_count > 0) {
-        data = reply.replyin;
-        len = reply.replyin_count;
+        if (replyout_count > 0 && replyout_address != NULL) {
+            data = replyout_address;
+            len = replyout_count;
+        } else if (replyin_count > 0) {
+            data = reply.complex.replyin;
+            len = replyin_count;
+        }
+    } else {
+        // Simple reply without OOL descriptor
+        retcode = reply.simple.returnvalue;
+        replyin_count = reply.simple.replyin_count;
+        replyout_count = reply.simple.replyout_count;
+
+        if (debug) {
+            fprintf(stderr, "DEBUG: Simple reply: returnvalue=%d, replyin_count=%d, replyout_count=%d\n",
+                    retcode, replyin_count, replyout_count);
+        }
+
+        if (replyin_count > 0) {
+            data = reply.simple.replyin;
+            len = replyin_count;
+        }
     }
 
     // The returnvalue from KCM is the KRB5 error code, not a MIG error
@@ -254,10 +285,10 @@ int kcm_mach_call(mach_port_t port,
             fprintf(stderr, "DEBUG: KCM returned error code: %d\n", retcode);
         }
         // Clean up OOL data if present
-        if (reply.replyout_count > 0 && reply.replyout.address != NULL) {
+        if (is_complex && replyout_count > 0 && replyout_address != NULL) {
             vm_deallocate(mach_task_self(),
-                         (vm_address_t)reply.replyout.address,
-                         reply.replyout_count);
+                         (vm_address_t)replyout_address,
+                         replyout_count);
         }
         return -3;
     }
@@ -274,10 +305,10 @@ int kcm_mach_call(mach_port_t port,
         *reply_data_out = malloc(len);
         if (*reply_data_out == NULL) {
             // Clean up OOL data if present
-            if (reply.replyout_count > 0 && reply.replyout.address != NULL) {
+            if (is_complex && replyout_count > 0 && replyout_address != NULL) {
                 vm_deallocate(mach_task_self(),
-                             (vm_address_t)reply.replyout.address,
-                             reply.replyout_count);
+                             (vm_address_t)replyout_address,
+                             replyout_count);
             }
             return -2;
         }
@@ -286,10 +317,10 @@ int kcm_mach_call(mach_port_t port,
     }
 
     // Clean up OOL data if present
-    if (reply.replyout_count > 0 && reply.replyout.address != NULL) {
+    if (is_complex && replyout_count > 0 && replyout_address != NULL) {
         vm_deallocate(mach_task_self(),
-                     (vm_address_t)reply.replyout.address,
-                     reply.replyout_count);
+                     (vm_address_t)replyout_address,
+                     replyout_count);
     }
 
     return 0;
