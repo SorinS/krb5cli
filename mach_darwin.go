@@ -6,8 +6,8 @@
 // via Mach IPC (Inter-Process Communication).
 //
 // The KCM daemon on macOS uses Heimdal's kcm protocol over Mach IPC.
-// The MIG (Mach Interface Generator) subsystem ID is 100, so message IDs
-// start at 100 for the call routine.
+// The MIG (Mach Interface Generator) subsystem is "mheim_ipc" with base ID 1,
+// so message IDs start at 1 for the kcm_call routine.
 package main
 
 /*
@@ -24,9 +24,10 @@ package main
 // Maximum in-band data size for KCM Mach RPC (from Heimdal kcm.defs)
 #define KCM_MAX_INBAND_SIZE 2048
 
-// KCM MIG subsystem base ID (from Heimdal kcm.defs)
+// KCM MIG subsystem base ID (from MIT krb5 kcmrpc.defs)
+// The subsystem is "mheim_ipc" with base ID 1
 // The actual routine is kcm_call which is routine 0 in the subsystem
-#define KCM_SUBSYSTEM_BASE 100
+#define KCM_SUBSYSTEM_BASE 1
 #define KCM_MSG_ID_CALL (KCM_SUBSYSTEM_BASE + 0)
 
 // Request message structure matching Heimdal's kcm MIG definition
