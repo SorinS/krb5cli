@@ -4,6 +4,10 @@
 // Package main provides Mach RPC transport for KCM on macOS.
 // This file contains the cgo bindings for communicating with the KCM daemon
 // via Mach IPC (Inter-Process Communication).
+//
+// The KCM daemon on macOS uses Heimdal's kcm protocol over Mach IPC.
+// The MIG (Mach Interface Generator) subsystem ID is 100, so message IDs
+// start at 100 for the call routine.
 package main
 
 /*
@@ -15,35 +19,39 @@ package main
 #include <servers/bootstrap.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
-// Maximum in-band data size for KCM Mach RPC
+// Maximum in-band data size for KCM Mach RPC (from Heimdal kcm.defs)
 #define KCM_MAX_INBAND_SIZE 2048
 
-// KCM Mach message IDs
-#define KCM_MACH_MSG_ID_REQUEST 1
-#define KCM_MACH_MSG_ID_REPLY   2
+// KCM MIG subsystem base ID (from Heimdal kcm.defs)
+// The actual routine is kcm_call which is routine 0 in the subsystem
+#define KCM_SUBSYSTEM_BASE 100
+#define KCM_MSG_ID_CALL (KCM_SUBSYSTEM_BASE + 0)
 
-// Request message structure for in-band data
+// Request message structure matching Heimdal's kcm MIG definition
+// This matches the __Request__kcm_call_t structure
 typedef struct {
     mach_msg_header_t header;
     mach_msg_body_t body;
-    mach_msg_ool_descriptor_t ool_request;  // out-of-line request data
+    mach_msg_ool_descriptor_t ool_request;
     NDR_record_t NDR;
-    mach_msg_type_number_t inband_request_size;
+    mach_msg_type_number_t inband_request_count;
     char inband_request[KCM_MAX_INBAND_SIZE];
-    mach_msg_type_number_t ool_request_size;
+    mach_msg_type_number_t ool_request_count;
 } kcm_request_msg_t;
 
-// Reply message structure
+// Reply message structure matching Heimdal's kcm MIG definition
+// This matches the __Reply__kcm_call_t structure
 typedef struct {
     mach_msg_header_t header;
     mach_msg_body_t body;
-    mach_msg_ool_descriptor_t ool_reply;  // out-of-line reply data
+    mach_msg_ool_descriptor_t ool_reply;
     NDR_record_t NDR;
-    int32_t return_code;
-    mach_msg_type_number_t inband_reply_size;
+    kern_return_t retcode;
+    mach_msg_type_number_t inband_reply_count;
     char inband_reply[KCM_MAX_INBAND_SIZE];
-    mach_msg_type_number_t ool_reply_size;
+    mach_msg_type_number_t ool_reply_count;
     mach_msg_trailer_t trailer;
 } kcm_reply_msg_t;
 
@@ -83,34 +91,34 @@ int kcm_mach_call(mach_port_t port,
                            MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
     req.header.msgh_remote_port = port;
     req.header.msgh_local_port = mig_get_reply_port();
-    req.header.msgh_id = KCM_MACH_MSG_ID_REQUEST;
+    req.header.msgh_id = KCM_MSG_ID_CALL;
 
     req.body.msgh_descriptor_count = 1;
     req.NDR = NDR_record;
 
+    // Set up the OOL descriptor (always present, even if empty)
+    req.ool_request.type = MACH_MSG_OOL_DESCRIPTOR;
+    req.ool_request.copy = MACH_MSG_VIRTUAL_COPY;
+    req.ool_request.deallocate = FALSE;
+
     // Determine if we should use in-band or out-of-line data
     if (request_len <= KCM_MAX_INBAND_SIZE) {
         // Use in-band data
-        req.inband_request_size = (mach_msg_type_number_t)request_len;
+        req.inband_request_count = (mach_msg_type_number_t)request_len;
         memcpy(req.inband_request, request_data, request_len);
-        req.ool_request_size = 0;
+        req.ool_request_count = 0;
         req.ool_request.address = NULL;
         req.ool_request.size = 0;
-        req.ool_request.deallocate = FALSE;
-        req.ool_request.copy = MACH_MSG_VIRTUAL_COPY;
-        req.ool_request.type = MACH_MSG_OOL_DESCRIPTOR;
     } else {
         // Use out-of-line data
-        req.inband_request_size = 0;
-        req.ool_request_size = (mach_msg_type_number_t)request_len;
+        req.inband_request_count = 0;
+        req.ool_request_count = (mach_msg_type_number_t)request_len;
         req.ool_request.address = (void *)request_data;
         req.ool_request.size = (mach_msg_size_t)request_len;
-        req.ool_request.deallocate = FALSE;
-        req.ool_request.copy = MACH_MSG_VIRTUAL_COPY;
-        req.ool_request.type = MACH_MSG_OOL_DESCRIPTOR;
     }
 
-    req.header.msgh_size = sizeof(req) - sizeof(reply.trailer);
+    // Calculate message size (exclude trailer which is only in reply)
+    req.header.msgh_size = sizeof(req);
 
     // Send request and receive reply
     kr = mach_msg(&req.header,
@@ -125,31 +133,34 @@ int kcm_mach_call(mach_port_t port,
         return -1;
     }
 
-    // Extract return code
-    *return_code_out = reply.return_code;
+    // Check the MIG return code
+    if (reply.retcode != KERN_SUCCESS) {
+        *return_code_out = reply.retcode;
+        return -3;
+    }
 
     // Extract reply data
     const void *data;
     size_t len;
 
-    if (reply.ool_reply_size > 0) {
+    if (reply.ool_reply_count > 0 && reply.ool_reply.address != NULL) {
         // Out-of-line reply
         data = reply.ool_reply.address;
-        len = reply.ool_reply_size;
+        len = reply.ool_reply_count;
     } else {
         // In-band reply
         data = reply.inband_reply;
-        len = reply.inband_reply_size;
+        len = reply.inband_reply_count;
     }
 
     if (len > 0) {
         *reply_data_out = malloc(len);
         if (*reply_data_out == NULL) {
             // Clean up OOL data if present
-            if (reply.ool_reply_size > 0 && reply.ool_reply.address != NULL) {
+            if (reply.ool_reply_count > 0 && reply.ool_reply.address != NULL) {
                 vm_deallocate(mach_task_self(),
                              (vm_address_t)reply.ool_reply.address,
-                             reply.ool_reply_size);
+                             reply.ool_reply_count);
             }
             return -2;
         }
@@ -158,10 +169,10 @@ int kcm_mach_call(mach_port_t port,
     }
 
     // Clean up OOL data if present
-    if (reply.ool_reply_size > 0 && reply.ool_reply.address != NULL) {
+    if (reply.ool_reply_count > 0 && reply.ool_reply.address != NULL) {
         vm_deallocate(mach_task_self(),
                      (vm_address_t)reply.ool_reply.address,
-                     reply.ool_reply_size);
+                     reply.ool_reply_count);
     }
 
     return 0;
