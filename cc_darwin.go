@@ -142,6 +142,7 @@ func newPlatformCCache() (CCache, error) {
 	cc := &darwinCCache{}
 
 	transport := NewMachTransport(defaultKCMMachService)
+	transport.SetDebug(debugMode)
 	if err := transport.Connect(); err != nil {
 		return nil, fmt.Errorf("failed to connect to KCM: %w", err)
 	}

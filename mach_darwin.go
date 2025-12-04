@@ -74,7 +74,8 @@ kern_return_t kcm_mach_disconnect(mach_port_t port) {
 int kcm_mach_call(mach_port_t port,
                   const void *request_data, size_t request_len,
                   void **reply_data_out, size_t *reply_len_out,
-                  int32_t *return_code_out) {
+                  int32_t *return_code_out,
+                  int debug) {
     kern_return_t kr;
     kcm_request_msg_t req;
     kcm_reply_msg_t reply;
@@ -120,6 +121,16 @@ int kcm_mach_call(mach_port_t port,
     // Calculate message size (exclude trailer which is only in reply)
     req.header.msgh_size = sizeof(req);
 
+    if (debug) {
+        fprintf(stderr, "DEBUG: Sending mach_msg with id=%d, size=%d, request_len=%zu\n",
+                req.header.msgh_id, req.header.msgh_size, request_len);
+        fprintf(stderr, "DEBUG: Request bytes: ");
+        for (size_t i = 0; i < request_len && i < 32; i++) {
+            fprintf(stderr, "%02x ", ((unsigned char*)request_data)[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+
     // Send request and receive reply
     kr = mach_msg(&req.header,
                   MACH_SEND_MSG | MACH_RCV_MSG,
@@ -130,7 +141,17 @@ int kcm_mach_call(mach_port_t port,
                   MACH_PORT_NULL);
 
     if (kr != KERN_SUCCESS) {
+        if (debug) {
+            fprintf(stderr, "DEBUG: mach_msg failed with kr=%d\n", kr);
+        }
+        *return_code_out = kr;
         return -1;
+    }
+
+    if (debug) {
+        fprintf(stderr, "DEBUG: mach_msg succeeded, reply.header.msgh_id=%d\n", reply.header.msgh_id);
+        fprintf(stderr, "DEBUG: reply.retcode=%d, inband_count=%d, ool_count=%d\n",
+                reply.retcode, reply.inband_reply_count, reply.ool_reply_count);
     }
 
     // Check the MIG return code
@@ -151,6 +172,14 @@ int kcm_mach_call(mach_port_t port,
         // In-band reply
         data = reply.inband_reply;
         len = reply.inband_reply_count;
+    }
+
+    if (debug && len > 0) {
+        fprintf(stderr, "DEBUG: Reply data (%zu bytes): ", len);
+        for (size_t i = 0; i < len && i < 64; i++) {
+            fprintf(stderr, "%02x ", ((unsigned char*)data)[i]);
+        }
+        fprintf(stderr, "\n");
     }
 
     if (len > 0) {
@@ -177,6 +206,17 @@ int kcm_mach_call(mach_port_t port,
 
     return 0;
 }
+
+// Check if a Mach service exists
+int kcm_service_exists(const char *service_name) {
+    mach_port_t port;
+    kern_return_t kr = bootstrap_look_up(bootstrap_port, service_name, &port);
+    if (kr == KERN_SUCCESS) {
+        mach_port_deallocate(mach_task_self(), port);
+        return 1;
+    }
+    return 0;
+}
 */
 import "C"
 import (
@@ -189,6 +229,7 @@ type MachTransport struct {
 	serviceName string
 	port        C.mach_port_t
 	connected   bool
+	debug       bool
 }
 
 // NewMachTransport creates a new Mach RPC transport
@@ -235,6 +276,11 @@ func (t *MachTransport) Close() error {
 	return nil
 }
 
+// SetDebug enables or disables debug output
+func (t *MachTransport) SetDebug(debug bool) {
+	t.debug = debug
+}
+
 // Call sends a request to KCM and returns the reply
 func (t *MachTransport) Call(request []byte) ([]byte, error) {
 	if !t.connected {
@@ -247,6 +293,11 @@ func (t *MachTransport) Call(request []byte) ([]byte, error) {
 	var replyLen C.size_t
 	var returnCode C.int32_t
 
+	debugFlag := C.int(0)
+	if t.debug {
+		debugFlag = C.int(1)
+	}
+
 	result := C.kcm_mach_call(
 		t.port,
 		unsafe.Pointer(&request[0]),
@@ -254,6 +305,7 @@ func (t *MachTransport) Call(request []byte) ([]byte, error) {
 		&replyData,
 		&replyLen,
 		&returnCode,
+		debugFlag,
 	)
 
 	if result == -1 {
@@ -270,13 +322,14 @@ func (t *MachTransport) Call(request []byte) ([]byte, error) {
 			&replyData,
 			&replyLen,
 			&returnCode,
+			debugFlag,
 		)
 
 		if result != 0 {
 			return nil, fmt.Errorf("KCM RPC failed after reconnect: %d", result)
 		}
 	} else if result != 0 {
-		return nil, fmt.Errorf("KCM RPC failed: %d", result)
+		return nil, fmt.Errorf("KCM RPC failed: %d (return_code=%d)", result, returnCode)
 	}
 
 	// Copy the reply data to Go memory and free the C memory
@@ -287,4 +340,11 @@ func (t *MachTransport) Call(request []byte) ([]byte, error) {
 	}
 
 	return reply, nil
+}
+
+// ServiceExists checks if a Mach service exists
+func ServiceExists(serviceName string) bool {
+	cServiceName := C.CString(serviceName)
+	defer C.free(unsafe.Pointer(cServiceName))
+	return C.kcm_service_exists(cServiceName) == 1
 }

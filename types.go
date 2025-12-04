@@ -20,6 +20,15 @@ type Config struct {
 	UseCC      bool
 	ListCreds  bool
 	CacheName  string
+	Debug      bool
+}
+
+// Global debug flag for credential cache operations
+var debugMode bool
+
+// SetDebugMode enables or disables debug output
+func SetDebugMode(debug bool) {
+	debugMode = debug
 }
 
 // CCache is the interface for credential cache implementations.

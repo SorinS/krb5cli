@@ -18,7 +18,11 @@ func main() {
 	flag.BoolVar(&cfg.UseCC, "usecc", true, "use credential cache (default: false)")
 	flag.BoolVar(&cfg.ListCreds, "list", false, "list credentials from cache")
 	flag.StringVar(&cfg.CacheName, "cache", "", "credential cache name (default: system default)")
+	flag.BoolVar(&cfg.Debug, "debug", false, "enable debug output")
 	flag.Parse()
+
+	// Set debug mode globally
+	SetDebugMode(cfg.Debug)
 
 	if cfg.ListCreds {
 		if err := listCredentials(cfg.CacheName); err != nil {
