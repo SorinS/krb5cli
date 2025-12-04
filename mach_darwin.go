@@ -21,54 +21,59 @@ package main
 #include <string.h>
 #include <stdio.h>
 
-// Maximum in-band data size for KCM Mach RPC (from Heimdal kcm.defs)
+// Maximum in-band data size for KCM Mach RPC (from kcmrpc.defs)
+// type k5_kcm_inband_msg = array [ * : 2048 ] of char;
 #define KCM_MAX_INBAND_SIZE 2048
 
-// KCM MIG subsystem base ID (from MIT krb5 kcmrpc.defs)
-// The subsystem is "mheim_ipc" with base ID 1
-// The actual routine is kcm_call which is routine 0 in the subsystem
+// KCM MIG subsystem base ID (from kcmrpc.defs: "subsystem mheim_ipc 1;")
+// The "call" routine is routine 0 in the subsystem, so message ID = 1
 #define KCM_SUBSYSTEM_BASE 1
 #define KCM_MSG_ID_CALL (KCM_SUBSYSTEM_BASE + 0)
 
-// Request message structure matching Heimdal's kcm MIG definition
-// This matches the __Request__kcm_call_t structure
+// Request message structure matching MIG-generated __Request__k5_kcmrpc_call_t
+// From kcmrpc.defs:
+//   routine call(server_port: mach_port_t;
+//                ServerAuditToken client_creds: audit_token_t;
+//                sreplyport reply_port: mach_port_make_send_once_t;
+//                in requestin: k5_kcm_inband_msg;
+//                in requestout: k5_kcm_outband_msg;
+//                ...);
 typedef struct {
     mach_msg_header_t header;
+    // Complex message body (because of OOL descriptor)
     mach_msg_body_t body;
-    mach_msg_ool_descriptor_t ool_request;
+    // Out-of-line descriptor for requestout (even if empty)
+    mach_msg_ool_descriptor_t requestout;
+    // NDR record for data representation
     NDR_record_t NDR;
-    mach_msg_type_number_t inband_request_count;
-    char inband_request[KCM_MAX_INBAND_SIZE];
-    mach_msg_type_number_t ool_request_count;
+    // In-band request count and data
+    mach_msg_type_number_t requestin_count;
+    char requestin[KCM_MAX_INBAND_SIZE];
+    // Out-of-line request count
+    mach_msg_type_number_t requestout_count;
 } kcm_request_msg_t;
 
-// Reply message structure matching Heimdal's kcm MIG definition
-// The reply can be either complex (with OOL data) or simple (in-band only)
-// We use a union-like approach with a large buffer
+// Reply message structure matching MIG-generated __Reply__k5_kcmrpc_call_t
+// From kcmrpc.defs:
+//   out returnvalue: int;
+//   out replyin: k5_kcm_inband_msg;
+//   out replyout: k5_kcm_outband_msg, dealloc);
 typedef struct {
     mach_msg_header_t header;
-    union {
-        // Complex reply (has OOL descriptor)
-        struct {
-            mach_msg_body_t body;
-            mach_msg_ool_descriptor_t ool_reply;
-            NDR_record_t NDR;
-            kern_return_t retcode;
-            mach_msg_type_number_t inband_reply_count;
-            char inband_reply[KCM_MAX_INBAND_SIZE];
-            mach_msg_type_number_t ool_reply_count;
-        } complex;
-        // Simple reply (no OOL descriptor)
-        struct {
-            NDR_record_t NDR;
-            kern_return_t retcode;
-            mach_msg_type_number_t inband_reply_count;
-            char inband_reply[KCM_MAX_INBAND_SIZE];
-            mach_msg_type_number_t ool_reply_count;
-        } simple;
-        // Raw buffer for inspection
-        char raw[KCM_MAX_INBAND_SIZE + 256];
-    } data;
+    // Complex message body (because of OOL descriptor for replyout)
+    mach_msg_body_t body;
+    // Out-of-line descriptor for replyout
+    mach_msg_ool_descriptor_t replyout;
+    // NDR record
+    NDR_record_t NDR;
+    // Return value (int32)
+    int32_t returnvalue;
+    // In-band reply count and data
+    mach_msg_type_number_t replyin_count;
+    char replyin[KCM_MAX_INBAND_SIZE];
+    // Out-of-line reply count
+    mach_msg_type_number_t replyout_count;
+    // Trailer
     mach_msg_trailer_t trailer;
 } kcm_reply_msg_t;
 
@@ -114,25 +119,25 @@ int kcm_mach_call(mach_port_t port,
     req.body.msgh_descriptor_count = 1;
     req.NDR = NDR_record;
 
-    // Set up the OOL descriptor (always present, even if empty)
-    req.ool_request.type = MACH_MSG_OOL_DESCRIPTOR;
-    req.ool_request.copy = MACH_MSG_VIRTUAL_COPY;
-    req.ool_request.deallocate = FALSE;
+    // Set up the OOL descriptor for requestout (always present, even if empty)
+    req.requestout.type = MACH_MSG_OOL_DESCRIPTOR;
+    req.requestout.copy = MACH_MSG_VIRTUAL_COPY;
+    req.requestout.deallocate = FALSE;
 
     // Determine if we should use in-band or out-of-line data
     if (request_len <= KCM_MAX_INBAND_SIZE) {
-        // Use in-band data
-        req.inband_request_count = (mach_msg_type_number_t)request_len;
-        memcpy(req.inband_request, request_data, request_len);
-        req.ool_request_count = 0;
-        req.ool_request.address = NULL;
-        req.ool_request.size = 0;
+        // Use in-band data (requestin)
+        req.requestin_count = (mach_msg_type_number_t)request_len;
+        memcpy(req.requestin, request_data, request_len);
+        req.requestout_count = 0;
+        req.requestout.address = NULL;
+        req.requestout.size = 0;
     } else {
-        // Use out-of-line data
-        req.inband_request_count = 0;
-        req.ool_request_count = (mach_msg_type_number_t)request_len;
-        req.ool_request.address = (void *)request_data;
-        req.ool_request.size = (mach_msg_size_t)request_len;
+        // Use out-of-line data (requestout)
+        req.requestin_count = 0;
+        req.requestout_count = (mach_msg_type_number_t)request_len;
+        req.requestout.address = (void *)request_data;
+        req.requestout.size = (mach_msg_size_t)request_len;
     }
 
     // Calculate message size (exclude trailer which is only in reply)
@@ -185,41 +190,42 @@ int kcm_mach_call(mach_port_t port,
         fprintf(stderr, "\n");
     }
 
-    // Extract reply data based on whether reply is complex or simple
+    // Reply is always complex (has OOL descriptor per MIG definition)
+    // Extract the return value and reply data
+    int32_t retcode = reply.returnvalue;
     const void *data = NULL;
     size_t len = 0;
-    kern_return_t retcode = 0;
 
-    if (is_complex) {
-        // Complex reply with OOL descriptor
-        retcode = reply.data.complex.retcode;
-        if (reply.data.complex.ool_reply_count > 0 && reply.data.complex.ool_reply.address != NULL) {
-            data = reply.data.complex.ool_reply.address;
-            len = reply.data.complex.ool_reply_count;
-        } else {
-            data = reply.data.complex.inband_reply;
-            len = reply.data.complex.inband_reply_count;
-        }
-        if (debug) {
-            fprintf(stderr, "DEBUG: Complex reply: retcode=%d, inband_count=%d, ool_count=%d\n",
-                    retcode, reply.data.complex.inband_reply_count, reply.data.complex.ool_reply_count);
-        }
-    } else {
-        // Simple reply without OOL descriptor
-        retcode = reply.data.simple.retcode;
-        data = reply.data.simple.inband_reply;
-        len = reply.data.simple.inband_reply_count;
-        if (debug) {
-            fprintf(stderr, "DEBUG: Simple reply: retcode=%d, inband_count=%d\n",
-                    retcode, reply.data.simple.inband_reply_count);
+    if (debug) {
+        fprintf(stderr, "DEBUG: returnvalue=%d, replyin_count=%d, replyout_count=%d\n",
+                retcode, reply.replyin_count, reply.replyout_count);
+        if (reply.replyout_count > 0) {
+            fprintf(stderr, "DEBUG: replyout.address=%p, replyout.size=%d\n",
+                    reply.replyout.address, reply.replyout.size);
         }
     }
 
-    // Check the MIG return code
-    if (retcode != KERN_SUCCESS) {
+    // Check for OOL reply first, then in-band
+    if (reply.replyout_count > 0 && reply.replyout.address != NULL) {
+        data = reply.replyout.address;
+        len = reply.replyout_count;
+    } else if (reply.replyin_count > 0) {
+        data = reply.replyin;
+        len = reply.replyin_count;
+    }
+
+    // The returnvalue from KCM is the KRB5 error code, not a MIG error
+    // A value of 0 means success
+    if (retcode != 0) {
         *return_code_out = retcode;
         if (debug) {
-            fprintf(stderr, "DEBUG: MIG retcode indicates error: %d\n", retcode);
+            fprintf(stderr, "DEBUG: KCM returned error code: %d\n", retcode);
+        }
+        // Clean up OOL data if present
+        if (reply.replyout_count > 0 && reply.replyout.address != NULL) {
+            vm_deallocate(mach_task_self(),
+                         (vm_address_t)reply.replyout.address,
+                         reply.replyout_count);
         }
         return -3;
     }
@@ -236,10 +242,10 @@ int kcm_mach_call(mach_port_t port,
         *reply_data_out = malloc(len);
         if (*reply_data_out == NULL) {
             // Clean up OOL data if present
-            if (is_complex && reply.data.complex.ool_reply_count > 0 && reply.data.complex.ool_reply.address != NULL) {
+            if (reply.replyout_count > 0 && reply.replyout.address != NULL) {
                 vm_deallocate(mach_task_self(),
-                             (vm_address_t)reply.data.complex.ool_reply.address,
-                             reply.data.complex.ool_reply_count);
+                             (vm_address_t)reply.replyout.address,
+                             reply.replyout_count);
             }
             return -2;
         }
@@ -248,10 +254,10 @@ int kcm_mach_call(mach_port_t port,
     }
 
     // Clean up OOL data if present
-    if (is_complex && reply.data.complex.ool_reply_count > 0 && reply.data.complex.ool_reply.address != NULL) {
+    if (reply.replyout_count > 0 && reply.replyout.address != NULL) {
         vm_deallocate(mach_task_self(),
-                     (vm_address_t)reply.data.complex.ool_reply.address,
-                     reply.data.complex.ool_reply_count);
+                     (vm_address_t)reply.replyout.address,
+                     reply.replyout_count);
     }
 
     return 0;
