@@ -42,16 +42,32 @@ typedef struct {
 } kcm_request_msg_t;
 
 // Reply message structure matching Heimdal's kcm MIG definition
-// This matches the __Reply__kcm_call_t structure
+// The reply can be either complex (with OOL data) or simple (in-band only)
+// We use a union-like approach with a large buffer
 typedef struct {
     mach_msg_header_t header;
-    mach_msg_body_t body;
-    mach_msg_ool_descriptor_t ool_reply;
-    NDR_record_t NDR;
-    kern_return_t retcode;
-    mach_msg_type_number_t inband_reply_count;
-    char inband_reply[KCM_MAX_INBAND_SIZE];
-    mach_msg_type_number_t ool_reply_count;
+    union {
+        // Complex reply (has OOL descriptor)
+        struct {
+            mach_msg_body_t body;
+            mach_msg_ool_descriptor_t ool_reply;
+            NDR_record_t NDR;
+            kern_return_t retcode;
+            mach_msg_type_number_t inband_reply_count;
+            char inband_reply[KCM_MAX_INBAND_SIZE];
+            mach_msg_type_number_t ool_reply_count;
+        } complex;
+        // Simple reply (no OOL descriptor)
+        struct {
+            NDR_record_t NDR;
+            kern_return_t retcode;
+            mach_msg_type_number_t inband_reply_count;
+            char inband_reply[KCM_MAX_INBAND_SIZE];
+            mach_msg_type_number_t ool_reply_count;
+        } simple;
+        // Raw buffer for inspection
+        char raw[KCM_MAX_INBAND_SIZE + 256];
+    } data;
     mach_msg_trailer_t trailer;
 } kcm_reply_msg_t;
 
@@ -148,30 +164,63 @@ int kcm_mach_call(mach_port_t port,
         return -1;
     }
 
+    // Check if reply is complex (has descriptors) or simple
+    int is_complex = (reply.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0;
+
     if (debug) {
-        fprintf(stderr, "DEBUG: mach_msg succeeded, reply.header.msgh_id=%d\n", reply.header.msgh_id);
-        fprintf(stderr, "DEBUG: reply.retcode=%d, inband_count=%d, ool_count=%d\n",
-                reply.retcode, reply.inband_reply_count, reply.ool_reply_count);
+        fprintf(stderr, "DEBUG: mach_msg succeeded\n");
+        fprintf(stderr, "DEBUG: reply.header.msgh_id=%d, msgh_size=%d, is_complex=%d\n",
+                reply.header.msgh_id, reply.header.msgh_size, is_complex);
+
+        // Dump raw reply bytes for debugging
+        size_t dump_len = reply.header.msgh_size;
+        if (dump_len > 128) dump_len = 128;
+        fprintf(stderr, "DEBUG: Raw reply (%zu bytes): ", dump_len);
+        unsigned char *raw = (unsigned char*)&reply;
+        for (size_t i = 0; i < dump_len; i++) {
+            fprintf(stderr, "%02x ", raw[i]);
+            if ((i + 1) % 16 == 0) fprintf(stderr, "\n                          ");
+        }
+        fprintf(stderr, "\n");
+    }
+
+    // Extract reply data based on whether reply is complex or simple
+    const void *data = NULL;
+    size_t len = 0;
+    kern_return_t retcode = 0;
+
+    if (is_complex) {
+        // Complex reply with OOL descriptor
+        retcode = reply.data.complex.retcode;
+        if (reply.data.complex.ool_reply_count > 0 && reply.data.complex.ool_reply.address != NULL) {
+            data = reply.data.complex.ool_reply.address;
+            len = reply.data.complex.ool_reply_count;
+        } else {
+            data = reply.data.complex.inband_reply;
+            len = reply.data.complex.inband_reply_count;
+        }
+        if (debug) {
+            fprintf(stderr, "DEBUG: Complex reply: retcode=%d, inband_count=%d, ool_count=%d\n",
+                    retcode, reply.data.complex.inband_reply_count, reply.data.complex.ool_reply_count);
+        }
+    } else {
+        // Simple reply without OOL descriptor
+        retcode = reply.data.simple.retcode;
+        data = reply.data.simple.inband_reply;
+        len = reply.data.simple.inband_reply_count;
+        if (debug) {
+            fprintf(stderr, "DEBUG: Simple reply: retcode=%d, inband_count=%d\n",
+                    retcode, reply.data.simple.inband_reply_count);
+        }
     }
 
     // Check the MIG return code
-    if (reply.retcode != KERN_SUCCESS) {
-        *return_code_out = reply.retcode;
+    if (retcode != KERN_SUCCESS) {
+        *return_code_out = retcode;
+        if (debug) {
+            fprintf(stderr, "DEBUG: MIG retcode indicates error: %d\n", retcode);
+        }
         return -3;
-    }
-
-    // Extract reply data
-    const void *data;
-    size_t len;
-
-    if (reply.ool_reply_count > 0 && reply.ool_reply.address != NULL) {
-        // Out-of-line reply
-        data = reply.ool_reply.address;
-        len = reply.ool_reply_count;
-    } else {
-        // In-band reply
-        data = reply.inband_reply;
-        len = reply.inband_reply_count;
     }
 
     if (debug && len > 0) {
@@ -186,10 +235,10 @@ int kcm_mach_call(mach_port_t port,
         *reply_data_out = malloc(len);
         if (*reply_data_out == NULL) {
             // Clean up OOL data if present
-            if (reply.ool_reply_count > 0 && reply.ool_reply.address != NULL) {
+            if (is_complex && reply.data.complex.ool_reply_count > 0 && reply.data.complex.ool_reply.address != NULL) {
                 vm_deallocate(mach_task_self(),
-                             (vm_address_t)reply.ool_reply.address,
-                             reply.ool_reply_count);
+                             (vm_address_t)reply.data.complex.ool_reply.address,
+                             reply.data.complex.ool_reply_count);
             }
             return -2;
         }
@@ -198,10 +247,10 @@ int kcm_mach_call(mach_port_t port,
     }
 
     // Clean up OOL data if present
-    if (reply.ool_reply_count > 0 && reply.ool_reply.address != NULL) {
+    if (is_complex && reply.data.complex.ool_reply_count > 0 && reply.data.complex.ool_reply.address != NULL) {
         vm_deallocate(mach_task_self(),
-                     (vm_address_t)reply.ool_reply.address,
-                     reply.ool_reply_count);
+                     (vm_address_t)reply.data.complex.ool_reply.address,
+                     reply.data.complex.ool_reply_count);
     }
 
     return 0;
