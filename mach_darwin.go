@@ -153,10 +153,42 @@ int kcm_mach_call(mach_port_t port,
         fprintf(stderr, "\n");
     }
 
-    // Send request and receive reply
+    if (debug) {
+        fprintf(stderr, "DEBUG: sizeof(kcm_request_msg_t)=%zu, sizeof(kcm_reply_msg_t)=%zu\n",
+                sizeof(kcm_request_msg_t), sizeof(kcm_reply_msg_t));
+        fprintf(stderr, "DEBUG: local_port=%d, remote_port=%d\n",
+                req.header.msgh_local_port, req.header.msgh_remote_port);
+    }
+
+    // First, send the request
     kr = mach_msg(&req.header,
-                  MACH_SEND_MSG | MACH_RCV_MSG,
+                  MACH_SEND_MSG,
                   req.header.msgh_size,
+                  0,
+                  MACH_PORT_NULL,
+                  MACH_MSG_TIMEOUT_NONE,
+                  MACH_PORT_NULL);
+
+    if (kr != KERN_SUCCESS) {
+        if (debug) {
+            fprintf(stderr, "DEBUG: mach_msg SEND failed with kr=%d (0x%x)\n", kr, kr);
+        }
+        *return_code_out = kr;
+        return -1;
+    }
+
+    if (debug) {
+        fprintf(stderr, "DEBUG: SEND succeeded, now receiving reply on port %d\n",
+                req.header.msgh_local_port);
+    }
+
+    // Now receive the reply
+    reply.header.msgh_size = sizeof(reply);
+    reply.header.msgh_local_port = req.header.msgh_local_port;
+
+    kr = mach_msg(&reply.header,
+                  MACH_RCV_MSG,
+                  0,
                   sizeof(reply),
                   req.header.msgh_local_port,
                   MACH_MSG_TIMEOUT_NONE,
@@ -164,7 +196,7 @@ int kcm_mach_call(mach_port_t port,
 
     if (kr != KERN_SUCCESS) {
         if (debug) {
-            fprintf(stderr, "DEBUG: mach_msg failed with kr=%d\n", kr);
+            fprintf(stderr, "DEBUG: mach_msg RECV failed with kr=%d (0x%x)\n", kr, kr);
         }
         *return_code_out = kr;
         return -1;
