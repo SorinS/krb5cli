@@ -409,10 +409,38 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
     }
 
     // Import the SPN as a GSS name
-    spn_buf.value = (void*)spn;
-    spn_buf.length = strlen(spn);
+    // GSS_C_NT_HOSTBASED_SERVICE expects "service@host" format
+    // If the user provides "service/host", convert it
+    char *spn_converted = NULL;
+    const char *spn_to_use = spn;
+
+    // Check if SPN contains '/' and convert to '@' format for GSS
+    const char *slash = strchr(spn, '/');
+    if (slash != NULL) {
+        // Convert "HTTP/hostname" to "HTTP@hostname"
+        size_t service_len = slash - spn;
+        size_t host_len = strlen(slash + 1);
+        spn_converted = malloc(service_len + 1 + host_len + 1);
+        if (spn_converted != NULL) {
+            memcpy(spn_converted, spn, service_len);
+            spn_converted[service_len] = '@';
+            memcpy(spn_converted + service_len + 1, slash + 1, host_len + 1);
+            spn_to_use = spn_converted;
+            if (gsscred_debug) {
+                fprintf(stderr, "DEBUG: Converted SPN from '%s' to '%s'\n", spn, spn_converted);
+            }
+        }
+    }
+
+    spn_buf.value = (void*)spn_to_use;
+    spn_buf.length = strlen(spn_to_use);
 
     major = gss_import_name(&minor, &spn_buf, GSS_C_NT_HOSTBASED_SERVICE, &target_name);
+
+    if (spn_converted != NULL) {
+        free(spn_converted);
+    }
+
     if (major != GSS_S_COMPLETE) {
         if (gsscred_debug) {
             fprintf(stderr, "DEBUG: gss_import_name failed: major=%u, minor=%u\n", major, minor);
@@ -424,7 +452,7 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
 
     if (gsscred_debug) {
         char *name_str = gss_name_to_string(target_name);
-        fprintf(stderr, "DEBUG: Target name: %s\n", name_str);
+        fprintf(stderr, "DEBUG: Target name (canonicalized): %s\n", name_str);
         free(name_str);
     }
 
@@ -432,26 +460,58 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
     // Using only minimal flags to reduce complexity
     OM_uint32 req_flags = GSS_C_MUTUAL_FLAG;
     OM_uint32 ret_flags = 0;
+    gss_OID actual_mech = GSS_C_NO_OID;
 
     if (gsscred_debug) {
-        fprintf(stderr, "DEBUG: Calling gss_init_sec_context...\n");
+        fprintf(stderr, "DEBUG: Calling gss_init_sec_context with GSS_SPNEGO_MECHANISM...\n");
     }
 
+    // Try with SPNEGO first (more compatible on macOS)
+    // SPNEGO will negotiate Kerberos underneath
     major = gss_init_sec_context(
         &minor,
         initiator_cred,         // Use explicitly acquired credential
         &ctx,
         target_name,
-        GSS_KRB5_MECHANISM,     // Use Kerberos mechanism
+        GSS_SPNEGO_MECHANISM,   // Use SPNEGO (negotiates to Kerberos)
         req_flags,
         GSS_C_INDEFINITE,       // No time limit
         GSS_C_NO_CHANNEL_BINDINGS,
         GSS_C_NO_BUFFER,        // No input token (first call)
-        NULL,                   // Don't need actual mech type
+        &actual_mech,           // Get actual mechanism used
         &output_token,
         &ret_flags,
         NULL                    // Don't need time_rec
     );
+
+    // If SPNEGO fails, try raw Kerberos
+    if (major != GSS_S_COMPLETE && major != GSS_S_CONTINUE_NEEDED) {
+        if (gsscred_debug) {
+            fprintf(stderr, "DEBUG: SPNEGO failed, trying raw Kerberos mechanism...\n");
+        }
+
+        // Reset context
+        if (ctx != GSS_C_NO_CONTEXT) {
+            gss_delete_sec_context(&minor, &ctx, GSS_C_NO_BUFFER);
+            ctx = GSS_C_NO_CONTEXT;
+        }
+
+        major = gss_init_sec_context(
+            &minor,
+            initiator_cred,         // Use explicitly acquired credential
+            &ctx,
+            target_name,
+            GSS_KRB5_MECHANISM,     // Use raw Kerberos
+            req_flags,
+            GSS_C_INDEFINITE,       // No time limit
+            GSS_C_NO_CHANNEL_BINDINGS,
+            GSS_C_NO_BUFFER,        // No input token (first call)
+            &actual_mech,           // Get actual mechanism used
+            &output_token,
+            &ret_flags,
+            NULL                    // Don't need time_rec
+        );
+    }
 
     gss_release_name(&minor, &target_name);
     gss_release_cred(&minor, &initiator_cred);
