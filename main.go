@@ -12,6 +12,8 @@ import (
 func main() {
 	var cfg = Config{}
 	var exportCred bool
+	var outputHTTP bool
+	var outputToken bool
 	flag.StringVar(&cfg.Realm, "realm", "", "realm (e.g. EXAMPLE.COM)")
 	flag.StringVar(&cfg.SPN, "spn", "", "SPN (e.g. HTTP/test.example.com)")
 	flag.StringVar(&cfg.Keytab, "keytab", "", "keytab file (e.g. test.keytab)")
@@ -21,6 +23,8 @@ func main() {
 	flag.StringVar(&cfg.CacheName, "cache", "", "credential cache name")
 	flag.BoolVar(&cfg.Debug, "debug", false, "enable debug output")
 	flag.BoolVar(&exportCred, "export", false, "export credential (test gss_export_cred)")
+	flag.BoolVar(&outputHTTP, "http", false, "output HTTP Authorization header only (for piping)")
+	flag.BoolVar(&outputToken, "token", false, "output base64 token only (for piping)")
 	flag.Parse()
 
 	// Set debug mode globally
@@ -53,7 +57,7 @@ func main() {
 
 	// If SPN is provided, try to get a service ticket
 	if cfg.SPN != "" {
-		if err := getServiceTicket(cfg.SPN); err != nil {
+		if err := getServiceTicket(cfg.SPN, outputHTTP, outputToken); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -254,9 +258,7 @@ func testExportCredential() error {
 }
 
 // getServiceTicket requests a service ticket for the given SPN
-func getServiceTicket(spn string) error {
-	fmt.Printf("Requesting service ticket for: %s\n", spn)
-
+func getServiceTicket(spn string, outputHTTP, outputToken bool) error {
 	// Only works on macOS 11+
 	if !IsMacOS11OrLater() {
 		return fmt.Errorf("service ticket acquisition via GSS API requires macOS 11 or later")
@@ -276,15 +278,28 @@ func getServiceTicket(spn string) error {
 		return fmt.Errorf("failed to get service ticket: %w", err)
 	}
 
+	// Base64 encode for HTTP Authorization header
+	encoded := base64.StdEncoding.EncodeToString(token)
+
+	// Output based on flags (pipe-friendly, no extra text)
+	if outputHTTP {
+		fmt.Printf("Negotiate %s", encoded)
+		return nil
+	}
+
+	if outputToken {
+		fmt.Print(encoded)
+		return nil
+	}
+
+	// Default verbose output
+	fmt.Printf("Requesting service ticket for: %s\n", spn)
 	fmt.Printf("\nService ticket obtained successfully!\n")
 	fmt.Printf("Token size: %d bytes\n", len(token))
 
-	// Base64 encode for HTTP Authorization header
-	encoded := base64.StdEncoding.EncodeToString(token)
 	fmt.Printf("\n=== HTTP Authorization Header ===\n")
 	fmt.Printf("Authorization: Negotiate %s\n", encoded)
 
-	// Also show just the token for easy copy-paste
 	fmt.Printf("\n=== Base64 Token (for copy-paste) ===\n")
 	fmt.Println(encoded)
 
