@@ -67,3 +67,8 @@ func (t *GSSCredTransport) GetCredentials() ([]GSSCredInfo, error) {
 func (t *GSSCredTransport) ExportCredential() ([]byte, error) {
 	return nil, fmt.Errorf("GSSCred is only available on macOS")
 }
+
+// GetServiceTicket returns an error on non-macOS platforms
+func (t *GSSCredTransport) GetServiceTicket(spn string) ([]byte, error) {
+	return nil, fmt.Errorf("GSSCred is only available on macOS")
+}

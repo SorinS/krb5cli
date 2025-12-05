@@ -341,6 +341,102 @@ static char* gss_get_default_principal(void) {
     return result;
 }
 
+// Get a service ticket for the specified SPN using gss_init_sec_context
+// This is the proper way to get service tickets on macOS
+// Returns the SPNEGO/Kerberos token that can be used for authentication
+static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int *out_err) {
+    *out_len = 0;
+    *out_err = 0;
+
+    OM_uint32 major, minor;
+    gss_ctx_id_t ctx = GSS_C_NO_CONTEXT;
+    gss_name_t target_name = GSS_C_NO_NAME;
+    gss_buffer_desc spn_buf = GSS_C_EMPTY_BUFFER;
+    gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
+
+    // Import the SPN as a GSS name
+    spn_buf.value = (void*)spn;
+    spn_buf.length = strlen(spn);
+
+    major = gss_import_name(&minor, &spn_buf, GSS_C_NT_HOSTBASED_SERVICE, &target_name);
+    if (major != GSS_S_COMPLETE) {
+        if (gsscred_debug) {
+            fprintf(stderr, "DEBUG: gss_import_name failed: major=%u, minor=%u\n", major, minor);
+        }
+        *out_err = -1;
+        return NULL;
+    }
+
+    if (gsscred_debug) {
+        char *name_str = gss_name_to_string(target_name);
+        fprintf(stderr, "DEBUG: Target name: %s\n", name_str);
+        free(name_str);
+    }
+
+    // Initialize security context - this will get a service ticket from the KDC
+    OM_uint32 req_flags = GSS_C_MUTUAL_FLAG | GSS_C_REPLAY_FLAG | GSS_C_SEQUENCE_FLAG;
+    OM_uint32 ret_flags = 0;
+
+    major = gss_init_sec_context(
+        &minor,
+        GSS_C_NO_CREDENTIAL,    // Use default credential (TGT from cache)
+        &ctx,
+        target_name,
+        GSS_KRB5_MECHANISM,     // Use Kerberos mechanism
+        req_flags,
+        GSS_C_INDEFINITE,       // No time limit
+        GSS_C_NO_CHANNEL_BINDINGS,
+        GSS_C_NO_BUFFER,        // No input token (first call)
+        NULL,                   // Don't need actual mech type
+        &output_token,
+        &ret_flags,
+        NULL                    // Don't need time_rec
+    );
+
+    gss_release_name(&minor, &target_name);
+
+    if (major != GSS_S_COMPLETE && major != GSS_S_CONTINUE_NEEDED) {
+        if (gsscred_debug) {
+            fprintf(stderr, "DEBUG: gss_init_sec_context failed: major=%u, minor=%u\n", major, minor);
+            // Try to get error message
+            OM_uint32 msg_ctx = 0;
+            gss_buffer_desc status_string = GSS_C_EMPTY_BUFFER;
+            gss_display_status(&minor, major, GSS_C_GSS_CODE, GSS_C_NO_OID, &msg_ctx, &status_string);
+            fprintf(stderr, "DEBUG: GSS error: %.*s\n", (int)status_string.length, (char*)status_string.value);
+            gss_release_buffer(&minor, &status_string);
+        }
+        if (ctx != GSS_C_NO_CONTEXT) {
+            gss_delete_sec_context(&minor, &ctx, GSS_C_NO_BUFFER);
+        }
+        *out_err = -2;
+        return NULL;
+    }
+
+    if (gsscred_debug) {
+        fprintf(stderr, "DEBUG: gss_init_sec_context succeeded, output token: %zu bytes\n", output_token.length);
+        fprintf(stderr, "DEBUG: Return flags: 0x%x\n", ret_flags);
+    }
+
+    // Copy the output token
+    unsigned char *result = NULL;
+    if (output_token.length > 0 && output_token.value != NULL) {
+        result = malloc(output_token.length);
+        if (result != NULL) {
+            memcpy(result, output_token.value, output_token.length);
+            *out_len = (int)output_token.length;
+        } else {
+            *out_err = -3;
+        }
+    }
+
+    gss_release_buffer(&minor, &output_token);
+    if (ctx != GSS_C_NO_CONTEXT) {
+        gss_delete_sec_context(&minor, &ctx, GSS_C_NO_BUFFER);
+    }
+
+    return result;
+}
+
 // Export credential to buffer using gss_export_cred
 // Returns the exported credential data which contains the serialized ticket
 static unsigned char* gss_export_default_cred(int *out_len, int *out_err) {
@@ -531,6 +627,25 @@ func (t *GSSCredTransport) ExportCredential() ([]byte, error) {
 	data := C.gss_export_default_cred(&dataLen, &errCode)
 	if data == nil {
 		return nil, fmt.Errorf("failed to export credential: error %d", errCode)
+	}
+	defer C.free(unsafe.Pointer(data))
+
+	return C.GoBytes(unsafe.Pointer(data), dataLen), nil
+}
+
+// GetServiceTicket obtains a service ticket for the specified SPN using gss_init_sec_context
+// The SPN should be in the format "service@hostname" or "service/hostname"
+// Returns the SPNEGO/Kerberos token that can be used for authentication
+func (t *GSSCredTransport) GetServiceTicket(spn string) ([]byte, error) {
+	cspn := C.CString(spn)
+	defer C.free(unsafe.Pointer(cspn))
+
+	var dataLen C.int
+	var errCode C.int
+
+	data := C.gss_get_service_ticket(cspn, &dataLen, &errCode)
+	if data == nil {
+		return nil, fmt.Errorf("failed to get service ticket: error %d", errCode)
 	}
 	defer C.free(unsafe.Pointer(data))
 
