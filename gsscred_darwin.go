@@ -673,6 +673,11 @@ func IsMacOS11OrLater() bool {
 	return C.is_macos_11_or_later() != 0
 }
 
+// IsWindows returns false on macOS
+func IsWindows() bool {
+	return false
+}
+
 // Connect establishes connection to GSSCred service
 func (t *GSSCredTransport) Connect() error {
 	result := C.gsscred_connect()

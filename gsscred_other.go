@@ -1,7 +1,7 @@
-//go:build !darwin
-// +build !darwin
+//go:build !darwin && !windows
+// +build !darwin,!windows
 
-// Package main provides stub implementations for GSSCred on non-macOS platforms.
+// Package main provides stub implementations for GSSCred on non-macOS/non-Windows platforms.
 package main
 
 import "fmt"
@@ -30,6 +30,11 @@ func NewGSSCredTransport() *GSSCredTransport {
 
 // IsMacOS11OrLater returns false on non-macOS platforms
 func IsMacOS11OrLater() bool {
+	return false
+}
+
+// IsWindows returns false on non-Windows platforms
+func IsWindows() bool {
 	return false
 }
 

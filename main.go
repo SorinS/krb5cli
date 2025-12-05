@@ -259,9 +259,9 @@ func testExportCredential() error {
 
 // getServiceTicket requests a service ticket for the given SPN
 func getServiceTicket(spn string, outputHTTP, outputToken bool) error {
-	// Only works on macOS 11+
-	if !IsMacOS11OrLater() {
-		return fmt.Errorf("service ticket acquisition via GSS API requires macOS 11 or later")
+	// Check platform support
+	if !IsMacOS11OrLater() && !IsWindows() {
+		return fmt.Errorf("service ticket acquisition requires macOS 11+ (GSS API) or Windows (SSPI)")
 	}
 
 	gsscred := NewGSSCredTransport()

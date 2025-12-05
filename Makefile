@@ -21,7 +21,7 @@ LDFLAGS=-ldflags="-X main.commit=$(COMMIT) -X main.buildDate=$(DATE)"
 -include Makefile.local
 
 # Compilation targets
-all: darwin-arm64 linux-amd64 linux-arm64
+all: darwin-arm64 linux-amd64 linux-arm64 windows-amd64
 #all: darwin-arm64 linux-amd64
 
 darwin-arm64:
