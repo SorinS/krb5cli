@@ -351,8 +351,62 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
     OM_uint32 major, minor;
     gss_ctx_id_t ctx = GSS_C_NO_CONTEXT;
     gss_name_t target_name = GSS_C_NO_NAME;
+    gss_cred_id_t initiator_cred = GSS_C_NO_CREDENTIAL;
     gss_buffer_desc spn_buf = GSS_C_EMPTY_BUFFER;
     gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
+
+    // First, explicitly acquire the default credential (TGT)
+    // This ensures we have a valid credential before calling gss_init_sec_context
+    if (gsscred_debug) {
+        fprintf(stderr, "DEBUG: Acquiring default credential...\n");
+    }
+
+    // Create a mechanism set containing only Kerberos
+    gss_OID_set_desc krb5_mech_set = { 1, GSS_KRB5_MECHANISM };
+
+    major = gss_acquire_cred(&minor, GSS_C_NO_NAME, GSS_C_INDEFINITE,
+                             &krb5_mech_set, GSS_C_INITIATE, &initiator_cred, NULL, NULL);
+    if (major != GSS_S_COMPLETE) {
+        if (gsscred_debug) {
+            fprintf(stderr, "DEBUG: gss_acquire_cred failed: major=%u (0x%x), minor=%u (0x%x)\n",
+                    major, major, minor, minor);
+
+            // Get GSS major status message
+            OM_uint32 msg_ctx = 0;
+            OM_uint32 disp_minor;
+            gss_buffer_desc status_string = GSS_C_EMPTY_BUFFER;
+
+            do {
+                gss_display_status(&disp_minor, major, GSS_C_GSS_CODE, GSS_C_NO_OID, &msg_ctx, &status_string);
+                fprintf(stderr, "DEBUG: GSS error (acquire_cred): %.*s\n", (int)status_string.length, (char*)status_string.value);
+                gss_release_buffer(&disp_minor, &status_string);
+            } while (msg_ctx != 0);
+
+            msg_ctx = 0;
+            do {
+                gss_display_status(&disp_minor, minor, GSS_C_MECH_CODE, GSS_KRB5_MECHANISM, &msg_ctx, &status_string);
+                if (status_string.length > 0) {
+                    fprintf(stderr, "DEBUG: Kerberos error (acquire_cred): %.*s\n", (int)status_string.length, (char*)status_string.value);
+                }
+                gss_release_buffer(&disp_minor, &status_string);
+            } while (msg_ctx != 0);
+        }
+        *out_err = -1;
+        return NULL;
+    }
+
+    if (gsscred_debug) {
+        // Show what credential we acquired
+        gss_name_t cred_name = GSS_C_NO_NAME;
+        OM_uint32 lifetime = 0;
+        major = gss_inquire_cred(&minor, initiator_cred, &cred_name, &lifetime, NULL, NULL);
+        if (major == GSS_S_COMPLETE && cred_name != GSS_C_NO_NAME) {
+            char *name_str = gss_name_to_string(cred_name);
+            fprintf(stderr, "DEBUG: Acquired credential for: %s (lifetime: %u seconds)\n", name_str, lifetime);
+            free(name_str);
+            gss_release_name(&minor, &cred_name);
+        }
+    }
 
     // Import the SPN as a GSS name
     spn_buf.value = (void*)spn;
@@ -363,7 +417,8 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
         if (gsscred_debug) {
             fprintf(stderr, "DEBUG: gss_import_name failed: major=%u, minor=%u\n", major, minor);
         }
-        *out_err = -1;
+        gss_release_cred(&minor, &initiator_cred);
+        *out_err = -2;
         return NULL;
     }
 
@@ -374,12 +429,17 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
     }
 
     // Initialize security context - this will get a service ticket from the KDC
-    OM_uint32 req_flags = GSS_C_MUTUAL_FLAG | GSS_C_REPLAY_FLAG | GSS_C_SEQUENCE_FLAG;
+    // Using only minimal flags to reduce complexity
+    OM_uint32 req_flags = GSS_C_MUTUAL_FLAG;
     OM_uint32 ret_flags = 0;
+
+    if (gsscred_debug) {
+        fprintf(stderr, "DEBUG: Calling gss_init_sec_context...\n");
+    }
 
     major = gss_init_sec_context(
         &minor,
-        GSS_C_NO_CREDENTIAL,    // Use default credential (TGT from cache)
+        initiator_cred,         // Use explicitly acquired credential
         &ctx,
         target_name,
         GSS_KRB5_MECHANISM,     // Use Kerberos mechanism
@@ -394,6 +454,7 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
     );
 
     gss_release_name(&minor, &target_name);
+    gss_release_cred(&minor, &initiator_cred);
 
     if (major != GSS_S_COMPLETE && major != GSS_S_CONTINUE_NEEDED) {
         if (gsscred_debug) {
@@ -424,7 +485,7 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
         if (ctx != GSS_C_NO_CONTEXT) {
             gss_delete_sec_context(&minor, &ctx, GSS_C_NO_BUFFER);
         }
-        *out_err = -2;
+        *out_err = -3;
         return NULL;
     }
 
@@ -441,7 +502,7 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
             memcpy(result, output_token.value, output_token.length);
             *out_len = (int)output_token.length;
         } else {
-            *out_err = -3;
+            *out_err = -4;
         }
     }
 
