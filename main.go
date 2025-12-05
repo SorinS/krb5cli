@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -278,30 +279,41 @@ func getServiceTicket(spn string) error {
 	fmt.Printf("\nService ticket obtained successfully!\n")
 	fmt.Printf("Token size: %d bytes\n", len(token))
 
-	// Print hex dump of the token (first 128 bytes)
-	fmt.Println("\nSPNEGO/Kerberos token (first 128 bytes):")
-	for i := 0; i < len(token) && i < 128; i++ {
-		if i%16 == 0 {
-			fmt.Printf("%04x: ", i)
-		}
-		fmt.Printf("%02x ", token[i])
-		if i%16 == 15 || i == len(token)-1 || i == 127 {
-			// Print ASCII representation
-			start := i - (i % 16)
-			end := i + 1
-			// Pad if needed
-			for j := end % 16; j != 0 && j < 16; j++ {
-				fmt.Print("   ")
+	// Base64 encode for HTTP Authorization header
+	encoded := base64.StdEncoding.EncodeToString(token)
+	fmt.Printf("\n=== HTTP Authorization Header ===\n")
+	fmt.Printf("Authorization: Negotiate %s\n", encoded)
+
+	// Also show just the token for easy copy-paste
+	fmt.Printf("\n=== Base64 Token (for copy-paste) ===\n")
+	fmt.Println(encoded)
+
+	if debugMode {
+		// Print hex dump of the token (first 128 bytes)
+		fmt.Println("\nSPNEGO/Kerberos token (first 128 bytes):")
+		for i := 0; i < len(token) && i < 128; i++ {
+			if i%16 == 0 {
+				fmt.Printf("%04x: ", i)
 			}
-			fmt.Print(" |")
-			for j := start; j < end && j < len(token); j++ {
-				if token[j] >= 32 && token[j] < 127 {
-					fmt.Printf("%c", token[j])
-				} else {
-					fmt.Print(".")
+			fmt.Printf("%02x ", token[i])
+			if i%16 == 15 || i == len(token)-1 || i == 127 {
+				// Print ASCII representation
+				start := i - (i % 16)
+				end := i + 1
+				// Pad if needed
+				for j := end % 16; j != 0 && j < 16; j++ {
+					fmt.Print("   ")
 				}
+				fmt.Print(" |")
+				for j := start; j < end && j < len(token); j++ {
+					if token[j] >= 32 && token[j] < 127 {
+						fmt.Printf("%c", token[j])
+					} else {
+						fmt.Print(".")
+					}
+				}
+				fmt.Println("|")
 			}
-			fmt.Println("|")
 		}
 	}
 
