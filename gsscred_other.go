@@ -1,7 +1,7 @@
-//go:build !darwin && !windows
-// +build !darwin,!windows
+//go:build !darwin && !windows && !linux
+// +build !darwin,!windows,!linux
 
-// Package main provides stub implementations for GSSCred on non-macOS/non-Windows platforms.
+// Package main provides stub implementations for unsupported platforms.
 package main
 
 import "fmt"
@@ -38,9 +38,18 @@ func IsWindows() bool {
 	return false
 }
 
-// SetDebug is a no-op on non-macOS platforms
+// IsLinux returns false on non-Linux platforms
+func IsLinux() bool {
+	return false
+}
+
+// SetDebug is a no-op on unsupported platforms
 func (t *GSSCredTransport) SetDebug(debug bool) {
 	t.debug = debug
+}
+
+// SetCCachePath is a no-op on unsupported platforms
+func (t *GSSCredTransport) SetCCachePath(path string) {
 }
 
 // Connect returns an error on non-macOS platforms

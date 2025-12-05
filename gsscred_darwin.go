@@ -668,6 +668,11 @@ func (t *GSSCredTransport) SetDebug(debug bool) {
 	}
 }
 
+// SetCCachePath is a no-op on macOS (GSS API manages caches)
+func (t *GSSCredTransport) SetCCachePath(path string) {
+	// macOS GSS API uses system credential cache, path is ignored
+}
+
 // IsMacOS11OrLater returns true if running on macOS 11 (Big Sur) or later
 func IsMacOS11OrLater() bool {
 	return C.is_macos_11_or_later() != 0
@@ -675,6 +680,11 @@ func IsMacOS11OrLater() bool {
 
 // IsWindows returns false on macOS
 func IsWindows() bool {
+	return false
+}
+
+// IsLinux returns false on macOS
+func IsLinux() bool {
 	return false
 }
 

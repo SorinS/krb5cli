@@ -57,7 +57,7 @@ func main() {
 
 	// If SPN is provided, try to get a service ticket
 	if cfg.SPN != "" {
-		if err := getServiceTicket(cfg.SPN, outputHTTP, outputToken); err != nil {
+		if err := getServiceTicket(cfg.SPN, cfg.CacheName, outputHTTP, outputToken); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -258,17 +258,22 @@ func testExportCredential() error {
 }
 
 // getServiceTicket requests a service ticket for the given SPN
-func getServiceTicket(spn string, outputHTTP, outputToken bool) error {
+func getServiceTicket(spn, cacheName string, outputHTTP, outputToken bool) error {
 	// Check platform support
-	if !IsMacOS11OrLater() && !IsWindows() {
-		return fmt.Errorf("service ticket acquisition requires macOS 11+ (GSS API) or Windows (SSPI)")
+	if !IsMacOS11OrLater() && !IsWindows() && !IsLinux() {
+		return fmt.Errorf("service ticket acquisition requires macOS 11+ (GSS API), Windows (SSPI), or Linux (gokrb5)")
 	}
 
 	gsscred := NewGSSCredTransport()
 	gsscred.SetDebug(debugMode)
 
+	// Set ccache path if provided (mainly for Linux)
+	if cacheName != "" {
+		gsscred.SetCCachePath(cacheName)
+	}
+
 	if err := gsscred.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to GSSCred: %w", err)
+		return fmt.Errorf("failed to connect: %w", err)
 	}
 	defer gsscred.Close()
 

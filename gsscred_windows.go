@@ -44,9 +44,19 @@ func IsWindows() bool {
 	return true
 }
 
+// IsLinux returns false on Windows
+func IsLinux() bool {
+	return false
+}
+
 // SetDebug enables or disables debug output
 func (t *GSSCredTransport) SetDebug(debug bool) {
 	t.debug = debug
+}
+
+// SetCCachePath is a no-op on Windows (SSPI manages credentials)
+func (t *GSSCredTransport) SetCCachePath(path string) {
+	// Windows SSPI uses LSA credential cache, path is ignored
 }
 
 // Connect acquires current user credentials via SSPI
