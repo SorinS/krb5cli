@@ -10,6 +10,7 @@ import (
 
 func main() {
 	var cfg = Config{}
+	var exportCred bool
 	flag.StringVar(&cfg.Realm, "realm", "", "realm (e.g. EXAMPLE.COM)")
 	flag.StringVar(&cfg.SPN, "spn", "", "SPN (e.g. HTTP/test.example.com)")
 	flag.StringVar(&cfg.Keytab, "keytab", "", "keytab file (e.g. test.keytab)")
@@ -18,6 +19,7 @@ func main() {
 	flag.BoolVar(&cfg.ListCreds, "list", false, "list credentials from cache")
 	flag.StringVar(&cfg.CacheName, "cache", "", "credential cache name")
 	flag.BoolVar(&cfg.Debug, "debug", false, "enable debug output")
+	flag.BoolVar(&exportCred, "export", false, "export credential (test gss_export_cred)")
 	flag.Parse()
 
 	// Set debug mode globally
@@ -36,6 +38,23 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		}
+		return
+	}
+
+	if exportCred {
+		if err := testExportCredential(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// If SPN is provided, try to get a service ticket
+	if cfg.SPN != "" {
+		if err := getServiceTicket(cfg.SPN); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
 		return
 	}
@@ -178,4 +197,67 @@ func formatDuration(d time.Duration) string {
 	}
 
 	return fmt.Sprintf("%dm", minutes)
+}
+
+// testExportCredential tests exporting credentials using gss_export_cred
+func testExportCredential() error {
+	// Only works on macOS 11+
+	if !IsMacOS11OrLater() {
+		return fmt.Errorf("credential export requires macOS 11 or later")
+	}
+
+	gsscred := NewGSSCredTransport()
+	gsscred.SetDebug(debugMode)
+
+	if err := gsscred.Connect(); err != nil {
+		return fmt.Errorf("failed to connect to GSSCred: %w", err)
+	}
+	defer gsscred.Close()
+
+	// Export the credential
+	data, err := gsscred.ExportCredential()
+	if err != nil {
+		return fmt.Errorf("failed to export credential: %w", err)
+	}
+
+	fmt.Printf("Exported credential: %d bytes\n", len(data))
+
+	// Print hex dump of first 256 bytes
+	fmt.Println("\nHex dump (first 256 bytes):")
+	for i := 0; i < len(data) && i < 256; i++ {
+		if i%16 == 0 {
+			fmt.Printf("%04x: ", i)
+		}
+		fmt.Printf("%02x ", data[i])
+		if i%16 == 15 || i == len(data)-1 {
+			// Print ASCII representation
+			start := i - (i % 16)
+			end := i + 1
+			// Pad if needed
+			for j := end % 16; j != 0 && j < 16; j++ {
+				fmt.Print("   ")
+			}
+			fmt.Print(" |")
+			for j := start; j < end; j++ {
+				if data[j] >= 32 && data[j] < 127 {
+					fmt.Printf("%c", data[j])
+				} else {
+					fmt.Print(".")
+				}
+			}
+			fmt.Println("|")
+		}
+	}
+
+	return nil
+}
+
+// getServiceTicket requests a service ticket for the given SPN
+func getServiceTicket(spn string) error {
+	fmt.Printf("Requesting service ticket for: %s\n", spn)
+
+	// TODO: Implement using gokrb5 with exported credentials
+	// For now, this is a placeholder that shows what we need to implement
+
+	return fmt.Errorf("service ticket acquisition not yet implemented - need to parse exported credential format")
 }

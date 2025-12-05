@@ -341,6 +341,72 @@ static char* gss_get_default_principal(void) {
     return result;
 }
 
+// Export credential to buffer using gss_export_cred
+// Returns the exported credential data which contains the serialized ticket
+static unsigned char* gss_export_default_cred(int *out_len, int *out_err) {
+    *out_len = 0;
+    *out_err = 0;
+
+    OM_uint32 major, minor;
+    gss_cred_id_t cred = GSS_C_NO_CREDENTIAL;
+    gss_buffer_desc token = GSS_C_EMPTY_BUFFER;
+
+    // Acquire default credential
+    major = gss_acquire_cred(&minor, GSS_C_NO_NAME, GSS_C_INDEFINITE,
+                             GSS_C_NO_OID_SET, GSS_C_INITIATE, &cred, NULL, NULL);
+    if (major != GSS_S_COMPLETE) {
+        if (gsscred_debug) {
+            fprintf(stderr, "DEBUG: gss_acquire_cred failed: major=%u, minor=%u\n", major, minor);
+        }
+        *out_err = -1;
+        return NULL;
+    }
+
+    // Export the credential
+    major = gss_export_cred(&minor, cred, &token);
+    gss_release_cred(&minor, &cred);
+
+    if (major != GSS_S_COMPLETE) {
+        if (gsscred_debug) {
+            fprintf(stderr, "DEBUG: gss_export_cred failed: major=%u, minor=%u\n", major, minor);
+        }
+        *out_err = -2;
+        return NULL;
+    }
+
+    if (token.length == 0 || token.value == NULL) {
+        if (gsscred_debug) {
+            fprintf(stderr, "DEBUG: gss_export_cred returned empty token\n");
+        }
+        *out_err = -3;
+        return NULL;
+    }
+
+    if (gsscred_debug) {
+        fprintf(stderr, "DEBUG: gss_export_cred returned %zu bytes\n", token.length);
+        // Print first 64 bytes for debugging
+        fprintf(stderr, "DEBUG: Exported cred data: ");
+        for (size_t i = 0; i < token.length && i < 64; i++) {
+            fprintf(stderr, "%02x ", ((unsigned char*)token.value)[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+
+    // Copy the data
+    unsigned char *result = malloc(token.length);
+    if (result == NULL) {
+        gss_release_buffer(&minor, &token);
+        *out_err = -4;
+        return NULL;
+    }
+
+    memcpy(result, token.value, token.length);
+    *out_len = (int)token.length;
+
+    gss_release_buffer(&minor, &token);
+    return result;
+}
+
 */
 import "C"
 
@@ -454,5 +520,20 @@ func (t *GSSCredTransport) GetCredentials() ([]GSSCredInfo, error) {
 	}
 
 	return creds, nil
+}
+
+// ExportCredential exports the default credential using gss_export_cred
+// This returns a serialized credential that may contain ticket and session key data
+func (t *GSSCredTransport) ExportCredential() ([]byte, error) {
+	var dataLen C.int
+	var errCode C.int
+
+	data := C.gss_export_default_cred(&dataLen, &errCode)
+	if data == nil {
+		return nil, fmt.Errorf("failed to export credential: error %d", errCode)
+	}
+	defer C.free(unsafe.Pointer(data))
+
+	return C.GoBytes(unsafe.Pointer(data), dataLen), nil
 }
 
