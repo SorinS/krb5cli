@@ -103,8 +103,42 @@ static char* gsscred_get_default_cache(void) {
         return NULL;
     }
 
-    // Get the UUID from the reply
+    // Debug: print all keys in the reply
+    if (gsscred_debug) {
+        fprintf(stderr, "DEBUG: GSSCred reply keys:\n");
+        xpc_dictionary_apply(reply, ^bool(const char *key, xpc_object_t value) {
+            const char *type_name = xpc_type_get_name(xpc_get_type(value));
+            fprintf(stderr, "DEBUG:   key='%s' type='%s'", key, type_name);
+            if (xpc_get_type(value) == XPC_TYPE_STRING) {
+                fprintf(stderr, " value='%s'", xpc_string_get_string_ptr(value));
+            } else if (xpc_get_type(value) == XPC_TYPE_INT64) {
+                fprintf(stderr, " value=%lld", xpc_int64_get_value(value));
+            } else if (xpc_get_type(value) == XPC_TYPE_DATA) {
+                fprintf(stderr, " len=%zu", xpc_data_get_length(value));
+            }
+            fprintf(stderr, "\n");
+            return true;
+        });
+    }
+
+    // Get the UUID from the reply - try multiple key names
     const void *uuid_data = xpc_dictionary_get_uuid(reply, "uuid");
+    if (uuid_data == NULL) {
+        uuid_data = xpc_dictionary_get_uuid(reply, "defaultUUID");
+    }
+    if (uuid_data == NULL) {
+        uuid_data = xpc_dictionary_get_uuid(reply, "cacheUUID");
+    }
+
+    // Also try getting UUID as data
+    if (uuid_data == NULL) {
+        size_t data_len = 0;
+        const void *data = xpc_dictionary_get_data(reply, "uuid", &data_len);
+        if (data != NULL && data_len == 16) {
+            uuid_data = data;
+        }
+    }
+
     if (uuid_data == NULL) {
         if (gsscred_debug) {
             fprintf(stderr, "DEBUG: No UUID in GSSCred reply\n");
