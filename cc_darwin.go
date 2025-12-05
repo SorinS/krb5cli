@@ -401,6 +401,17 @@ func (h *darwinCCacheHandle) GetPrincipal() (types.PrincipalName, string, error)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// On macOS 11+, use GSS API if available
+	if h.client.gsscred != nil {
+		principal, err := h.client.gsscred.GetDefaultPrincipal()
+		if err != nil {
+			return types.PrincipalName{}, "", err
+		}
+		// Parse principal string (e.g., "user@REALM")
+		return parsePrincipalString(principal)
+	}
+
+	// Fall back to KCM protocol
 	req := newKCMRequest(kcmOpGetPrincipal, h.name)
 	reply, err := h.client.call(req)
 	if err != nil {
@@ -412,6 +423,51 @@ func (h *darwinCCacheHandle) GetPrincipal() (types.PrincipalName, string, error)
 	}
 
 	return reply.readPrincipal()
+}
+
+// parsePrincipalString parses a principal string like "user@REALM" into components
+func parsePrincipalString(s string) (types.PrincipalName, string, error) {
+	// Find the last @ which separates principal from realm
+	idx := -1
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '@' {
+			idx = i
+			break
+		}
+	}
+
+	if idx < 0 {
+		// No realm separator found, use the whole string as principal
+		return types.PrincipalName{
+			NameType:   1, // KRB5_NT_PRINCIPAL
+			NameString: []string{s},
+		}, "", nil
+	}
+
+	principal := s[:idx]
+	realm := s[idx+1:]
+
+	// Split principal by "/" for service principals
+	parts := splitPrincipal(principal)
+
+	return types.PrincipalName{
+		NameType:   1, // KRB5_NT_PRINCIPAL
+		NameString: parts,
+	}, realm, nil
+}
+
+// splitPrincipal splits a principal name by "/"
+func splitPrincipal(s string) []string {
+	var parts []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
 }
 
 // Store stores a credential in the cache
@@ -448,6 +504,38 @@ func (h *darwinCCacheHandle) GetCredentials() ([]*Credential, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// On macOS 11+, use GSS API if available
+	if h.client.gsscred != nil {
+		gssCreds, err := h.client.gsscred.GetCredentials()
+		if err != nil {
+			return nil, err
+		}
+
+		// Convert GSS credentials to our Credential type
+		creds := make([]*Credential, 0, len(gssCreds))
+		for _, gc := range gssCreds {
+			clientPrinc, clientRealm, _ := parsePrincipalString(gc.ClientPrincipal)
+			serverPrinc, serverRealm, _ := parsePrincipalString(gc.ServerPrincipal)
+
+			cred := &Credential{
+				Client:      clientPrinc,
+				ClientRealm: clientRealm,
+				Server:      serverPrinc,
+				ServerRealm: serverRealm,
+				AuthTime:    time.Unix(gc.AuthTime, 0),
+				StartTime:   time.Unix(gc.StartTime, 0),
+				EndTime:     time.Unix(gc.EndTime, 0),
+				RenewTill:   time.Unix(gc.RenewTill, 0),
+				Key: types.EncryptionKey{
+					KeyType: gc.KeyType,
+				},
+			}
+			creds = append(creds, cred)
+		}
+		return creds, nil
+	}
+
+	// Fall back to KCM protocol
 	// Try GET_CRED_LIST first
 	req := newKCMRequest(kcmOpGetCredList, h.name)
 	reply, err := h.client.call(req)

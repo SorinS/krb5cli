@@ -161,103 +161,181 @@ static char* gsscred_get_default_cache(void) {
     return uuid_str;
 }
 
-// Fetch credential data for a cache by UUID
-// This uses the GSS framework to access credentials
-// Returns serialized credential data, or NULL on error
-// The caller must free the returned data
-static unsigned char* gsscred_fetch_creds(const char *cache_name, int *out_len, int *out_err) {
-    *out_len = 0;
-    *out_err = 0;
+// ============================================================================
+// GSS Framework API for credential access
+// Using gss_iter_creds to iterate through credentials properly
+// ============================================================================
 
-    if (gsscred_connect() != 0) {
-        *out_err = -1;
-        return NULL;
+#include <GSS/GSS.h>
+
+// Structure to hold credential information
+typedef struct {
+    char *client_principal;
+    char *server_principal;
+    uint32_t lifetime;      // remaining lifetime in seconds
+    time_t auth_time;
+    time_t start_time;
+    time_t end_time;
+    time_t renew_till;
+    int32_t key_type;
+} gss_cred_info_t;
+
+// Maximum number of credentials to collect
+#define MAX_CREDS 100
+
+// Global storage for collected credentials (used by iterator callback)
+static gss_cred_info_t *g_creds = NULL;
+static int g_cred_count = 0;
+static int g_max_creds = 0;
+
+// Convert gss_name_t to string
+static char* gss_name_to_string(gss_name_t name) {
+    if (name == GSS_C_NO_NAME) {
+        return strdup("(none)");
     }
 
-    xpc_object_t request = xpc_dictionary_create(NULL, NULL, 0);
-    xpc_dictionary_set_string(request, "command", "fetch");
-    xpc_dictionary_set_string(request, "mech", "kHEIMTypeKerberos");
+    OM_uint32 major, minor;
+    gss_buffer_desc buf = GSS_C_EMPTY_BUFFER;
 
-    // Strip any "API:" prefix from cache name
-    const char *uuid_str = cache_name;
-    if (strncmp(cache_name, "API:", 4) == 0) {
-        uuid_str = cache_name + 4;
+    major = gss_display_name(&minor, name, &buf, NULL);
+    if (major != GSS_S_COMPLETE) {
+        return strdup("(error)");
     }
 
-    // Parse UUID string to bytes
-    unsigned char uuid_bytes[16];
-    int parsed = sscanf(uuid_str, "%2hhx%2hhx%2hhx%2hhx-%2hhx%2hhx-%2hhx%2hhx-%2hhx%2hhx-%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx",
-                        &uuid_bytes[0], &uuid_bytes[1], &uuid_bytes[2], &uuid_bytes[3],
-                        &uuid_bytes[4], &uuid_bytes[5], &uuid_bytes[6], &uuid_bytes[7],
-                        &uuid_bytes[8], &uuid_bytes[9], &uuid_bytes[10], &uuid_bytes[11],
-                        &uuid_bytes[12], &uuid_bytes[13], &uuid_bytes[14], &uuid_bytes[15]);
+    char *result = strndup(buf.value, buf.length);
+    gss_release_buffer(&minor, &buf);
+    return result;
+}
 
-    if (parsed != 16) {
-        if (gsscred_debug) {
-            fprintf(stderr, "DEBUG: Failed to parse UUID: %s (parsed %d)\n", uuid_str, parsed);
-        }
-        *out_err = -2;
-        return NULL;
+// Get credentials using GSS framework API
+// Returns array of credential info structures
+static int gss_get_credentials(gss_cred_info_t **out_creds, int *out_count) {
+    *out_creds = NULL;
+    *out_count = 0;
+
+    // Allocate storage for credentials
+    g_creds = calloc(MAX_CREDS, sizeof(gss_cred_info_t));
+    if (g_creds == NULL) {
+        return -1;
     }
+    g_cred_count = 0;
+    g_max_creds = MAX_CREDS;
 
-    xpc_dictionary_set_uuid(request, "uuid", uuid_bytes);
+    OM_uint32 minor;
 
     if (gsscred_debug) {
-        fprintf(stderr, "DEBUG: Sending GSSCred 'fetch' request for UUID: %s\n", uuid_str);
+        fprintf(stderr, "DEBUG: Using gss_iter_creds to iterate credentials\n");
     }
 
-    xpc_object_t reply = xpc_connection_send_message_with_reply_sync(gsscred_conn, request);
-
-    if (reply == NULL || xpc_get_type(reply) == XPC_TYPE_ERROR) {
-        if (gsscred_debug) {
-            fprintf(stderr, "DEBUG: GSSCred fetch request failed\n");
+    // Iterate over all Kerberos credentials
+    // GSS_KRB5_MECHANISM is the OID for Kerberos
+    gss_iter_creds(&minor, 0, GSS_KRB5_MECHANISM, ^(gss_OID mech, gss_cred_id_t cred) {
+        if (cred == GSS_C_NO_CREDENTIAL || g_cred_count >= g_max_creds) {
+            return;
         }
-        *out_err = -3;
-        return NULL;
-    }
 
-    // Check for error in reply
-    int64_t err_code = xpc_dictionary_get_int64(reply, "error");
-    if (err_code != 0) {
         if (gsscred_debug) {
-            fprintf(stderr, "DEBUG: GSSCred returned error: %lld\n", err_code);
+            fprintf(stderr, "DEBUG: Found credential %d\n", g_cred_count);
         }
-        *out_err = (int)err_code;
-        return NULL;
-    }
 
-    // Get credentials data
-    size_t data_len = 0;
-    const void *data = xpc_dictionary_get_data(reply, "credentials", &data_len);
-    if (data == NULL || data_len == 0) {
-        // Try alternative key names
-        data = xpc_dictionary_get_data(reply, "data", &data_len);
-    }
+        gss_cred_info_t *info = &g_creds[g_cred_count];
+        memset(info, 0, sizeof(gss_cred_info_t));
 
-    if (data == NULL || data_len == 0) {
-        if (gsscred_debug) {
-            fprintf(stderr, "DEBUG: No credentials data in GSSCred reply\n");
-            // Print all keys in reply for debugging
-            xpc_dictionary_apply(reply, ^bool(const char *key, xpc_object_t value) {
-                fprintf(stderr, "DEBUG: Reply key: %s, type: %s\n", key, xpc_type_get_name(xpc_get_type(value)));
-                return true;
-            });
+        // Get the credential name (client principal)
+        OM_uint32 major, min;
+        gss_name_t cred_name = GSS_C_NO_NAME;
+        OM_uint32 lifetime = 0;
+
+        major = gss_inquire_cred(&min, cred, &cred_name, &lifetime, NULL, NULL);
+        if (major == GSS_S_COMPLETE) {
+            info->client_principal = gss_name_to_string(cred_name);
+            info->lifetime = lifetime;
+
+            // Calculate times based on lifetime
+            time_t now = time(NULL);
+            info->end_time = now + lifetime;
+            info->start_time = now; // Approximate
+            info->auth_time = now;  // Approximate
+
+            if (gsscred_debug) {
+                fprintf(stderr, "DEBUG: Credential %d: principal=%s, lifetime=%u\n",
+                        g_cred_count, info->client_principal, lifetime);
+            }
+
+            if (cred_name != GSS_C_NO_NAME) {
+                gss_release_name(&min, &cred_name);
+            }
+        } else {
+            info->client_principal = strdup("(unknown)");
+            if (gsscred_debug) {
+                fprintf(stderr, "DEBUG: gss_inquire_cred failed: major=%u, minor=%u\n", major, min);
+            }
         }
-        *out_err = -4;
-        return NULL;
-    }
 
-    unsigned char *result = malloc(data_len);
-    if (result == NULL) {
-        *out_err = -5;
-        return NULL;
-    }
+        // Server principal - for TGT it would be krbtgt/REALM@REALM
+        // We can try to get this from the credential if available
+        info->server_principal = strdup("krbtgt");
 
-    memcpy(result, data, data_len);
-    *out_len = (int)data_len;
+        g_cred_count++;
+    });
 
     if (gsscred_debug) {
-        fprintf(stderr, "DEBUG: GSSCred returned %d bytes of credential data\n", *out_len);
+        fprintf(stderr, "DEBUG: gss_iter_creds found %d credentials\n", g_cred_count);
+    }
+
+    if (g_cred_count == 0) {
+        free(g_creds);
+        g_creds = NULL;
+        return 0;
+    }
+
+    *out_creds = g_creds;
+    *out_count = g_cred_count;
+    g_creds = NULL; // Transfer ownership
+
+    return 0;
+}
+
+// Free credential info array
+static void gss_free_credentials(gss_cred_info_t *creds, int count) {
+    if (creds == NULL) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        free(creds[i].client_principal);
+        free(creds[i].server_principal);
+    }
+    free(creds);
+}
+
+// Get the default principal name using GSS API
+static char* gss_get_default_principal(void) {
+    OM_uint32 major, minor;
+    gss_cred_id_t cred = GSS_C_NO_CREDENTIAL;
+    gss_name_t name = GSS_C_NO_NAME;
+    char *result = NULL;
+
+    // Acquire default credential
+    major = gss_acquire_cred(&minor, GSS_C_NO_NAME, GSS_C_INDEFINITE,
+                             GSS_C_NO_OID_SET, GSS_C_INITIATE, &cred, NULL, NULL);
+    if (major != GSS_S_COMPLETE) {
+        if (gsscred_debug) {
+            fprintf(stderr, "DEBUG: gss_acquire_cred failed: major=%u, minor=%u\n", major, minor);
+        }
+        return NULL;
+    }
+
+    // Get the name from the credential
+    major = gss_inquire_cred(&minor, cred, &name, NULL, NULL, NULL);
+    if (major == GSS_S_COMPLETE && name != GSS_C_NO_NAME) {
+        result = gss_name_to_string(name);
+        gss_release_name(&minor, &name);
+    }
+
+    gss_release_cred(&minor, &cred);
+
+    if (gsscred_debug) {
+        fprintf(stderr, "DEBUG: Default principal: %s\n", result ? result : "(none)");
     }
 
     return result;
@@ -321,19 +399,60 @@ func (t *GSSCredTransport) GetDefaultCache() (string, error) {
 	return C.GoString(cstr), nil
 }
 
-// FetchCredentials fetches credentials for the specified cache
-func (t *GSSCredTransport) FetchCredentials(cacheName string) ([]byte, error) {
-	cname := C.CString(cacheName)
-	defer C.free(unsafe.Pointer(cname))
-
-	var dataLen C.int
-	var errCode C.int
-
-	data := C.gsscred_fetch_creds(cname, &dataLen, &errCode)
-	if data == nil {
-		return nil, fmt.Errorf("failed to fetch credentials: error %d", errCode)
-	}
-	defer C.free(unsafe.Pointer(data))
-
-	return C.GoBytes(unsafe.Pointer(data), dataLen), nil
+// GSSCredInfo holds credential information from GSS API
+type GSSCredInfo struct {
+	ClientPrincipal string
+	ServerPrincipal string
+	Lifetime        uint32
+	AuthTime        int64
+	StartTime       int64
+	EndTime         int64
+	RenewTill       int64
+	KeyType         int32
 }
+
+// GetDefaultPrincipal returns the default principal using GSS API
+func (t *GSSCredTransport) GetDefaultPrincipal() (string, error) {
+	cstr := C.gss_get_default_principal()
+	if cstr == nil {
+		return "", fmt.Errorf("no default credential available")
+	}
+	defer C.free(unsafe.Pointer(cstr))
+	return C.GoString(cstr), nil
+}
+
+// GetCredentials returns all credentials using GSS API
+func (t *GSSCredTransport) GetCredentials() ([]GSSCredInfo, error) {
+	var cCreds *C.gss_cred_info_t
+	var count C.int
+
+	result := C.gss_get_credentials(&cCreds, &count)
+	if result != 0 {
+		return nil, fmt.Errorf("failed to get credentials: %d", result)
+	}
+
+	if count == 0 || cCreds == nil {
+		return []GSSCredInfo{}, nil
+	}
+	defer C.gss_free_credentials(cCreds, count)
+
+	// Convert C array to Go slice
+	creds := make([]GSSCredInfo, int(count))
+	credArray := (*[1 << 20]C.gss_cred_info_t)(unsafe.Pointer(cCreds))[:count:count]
+
+	for i := 0; i < int(count); i++ {
+		creds[i] = GSSCredInfo{
+			ClientPrincipal: C.GoString(credArray[i].client_principal),
+			ServerPrincipal: C.GoString(credArray[i].server_principal),
+			Lifetime:        uint32(credArray[i].lifetime),
+			AuthTime:        int64(credArray[i].auth_time),
+			StartTime:       int64(credArray[i].start_time),
+			EndTime:         int64(credArray[i].end_time),
+			RenewTill:       int64(credArray[i].renew_till),
+			KeyType:         int32(credArray[i].key_type),
+		}
+	}
+
+	return creds, nil
+}
+
