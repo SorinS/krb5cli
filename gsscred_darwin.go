@@ -397,13 +397,29 @@ static unsigned char* gss_get_service_ticket(const char *spn, int *out_len, int 
 
     if (major != GSS_S_COMPLETE && major != GSS_S_CONTINUE_NEEDED) {
         if (gsscred_debug) {
-            fprintf(stderr, "DEBUG: gss_init_sec_context failed: major=%u, minor=%u\n", major, minor);
-            // Try to get error message
+            fprintf(stderr, "DEBUG: gss_init_sec_context failed: major=%u (0x%x), minor=%u (0x%x)\n",
+                    major, major, minor, minor);
+
+            // Get GSS major status message
             OM_uint32 msg_ctx = 0;
+            OM_uint32 disp_minor;
             gss_buffer_desc status_string = GSS_C_EMPTY_BUFFER;
-            gss_display_status(&minor, major, GSS_C_GSS_CODE, GSS_C_NO_OID, &msg_ctx, &status_string);
-            fprintf(stderr, "DEBUG: GSS error: %.*s\n", (int)status_string.length, (char*)status_string.value);
-            gss_release_buffer(&minor, &status_string);
+
+            do {
+                gss_display_status(&disp_minor, major, GSS_C_GSS_CODE, GSS_C_NO_OID, &msg_ctx, &status_string);
+                fprintf(stderr, "DEBUG: GSS major error: %.*s\n", (int)status_string.length, (char*)status_string.value);
+                gss_release_buffer(&disp_minor, &status_string);
+            } while (msg_ctx != 0);
+
+            // Get mechanism-specific (minor) status message - this often has the real error
+            msg_ctx = 0;
+            do {
+                gss_display_status(&disp_minor, minor, GSS_C_MECH_CODE, GSS_KRB5_MECHANISM, &msg_ctx, &status_string);
+                if (status_string.length > 0) {
+                    fprintf(stderr, "DEBUG: Kerberos error: %.*s\n", (int)status_string.length, (char*)status_string.value);
+                }
+                gss_release_buffer(&disp_minor, &status_string);
+            } while (msg_ctx != 0);
         }
         if (ctx != GSS_C_NO_CONTEXT) {
             gss_delete_sec_context(&minor, &ctx, GSS_C_NO_BUFFER);
