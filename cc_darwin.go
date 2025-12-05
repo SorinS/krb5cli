@@ -270,27 +270,18 @@ func mapKCMError(code int32) error {
 
 // GetDefaultCacheName returns the name of the default credential cache
 func (c *darwinCCache) GetDefaultCacheName() (string, error) {
-	// Try KCM protocol first - this gives us a cache name that KCM actually knows about
-	req := newKCMRequest(kcmOpGetDefaultCache, "")
-	reply, err := c.call(req)
-	if err == nil {
-		name, err := reply.readString()
-		if err == nil && name != "" {
-			return name, nil
-		}
-	}
-
-	// If KCM fails but we have a GSSCred cache name, return it as a display name
-	// (Note: This cache name may not work with KCM operations)
+	// On macOS 11+, prefer GSSCred cache name (KCM calls typically fail)
 	if c.gsscredCacheName != "" {
 		return c.gsscredCacheName, nil
 	}
 
-	// If we got an error from KCM and don't have a GSSCred fallback, return the error
+	// Fall back to KCM protocol
+	req := newKCMRequest(kcmOpGetDefaultCache, "")
+	reply, err := c.call(req)
 	if err != nil {
 		return "", err
 	}
-	return "", ErrCacheNotFound
+	return reply.readString()
 }
 
 // SetDefaultCache sets the default credential cache

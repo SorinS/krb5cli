@@ -39,8 +39,6 @@ func main() {
 		}
 		return
 	}
-
-	fmt.Printf("=> configuration: %v\n", cfg)
 }
 
 // listCaches lists all available credential caches
@@ -52,42 +50,20 @@ func listCaches() error {
 	}
 	defer cc.Close()
 
-	// Get default cache name
+	// Get default cache name - this is sufficient for showing available caches
+	// On macOS 11+, GSSCred provides the default cache; KCM calls would fail
 	defaultCache, err := cc.GetDefaultCacheName()
 	if err != nil {
-		// Not fatal - we can still list caches
-		defaultCache = ""
+		return fmt.Errorf("failed to get default cache: %w", err)
 	}
 
 	fmt.Println("Credential caches:")
 	fmt.Println()
 
+	count := 0
 	if defaultCache != "" {
 		fmt.Printf("  * %s (default)\n", defaultCache)
-	}
-
-	// Try to list all caches
-	caches, err := cc.ListCaches()
-	if err != nil {
-		// If we can't list caches but have a default, that's OK
-		if defaultCache != "" {
-			fmt.Printf("\nTotal: 1 cache(s)\n")
-			return nil
-		}
-		return fmt.Errorf("failed to list caches: %w", err)
-	}
-
-	// Print non-default caches
-	count := 0
-	for _, name := range caches {
-		if name != defaultCache {
-			fmt.Printf("    %s\n", name)
-			count++
-		}
-	}
-
-	if defaultCache != "" {
-		count++
+		count = 1
 	}
 
 	fmt.Printf("\nTotal: %d cache(s)\n", count)
