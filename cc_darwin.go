@@ -22,10 +22,6 @@ import (
 
 // KCM Protocol constants
 const (
-	// Protocol version
-	kcmProtocolVersionMajor = 2
-	kcmProtocolVersionMinor = 0
-
 	// UUID length in bytes
 	kcmUUIDLen = 16
 
@@ -448,12 +444,13 @@ func (h *darwinCCacheHandle) RemoveCredential(server types.PrincipalName, server
 }
 
 // newKCMRequest creates a new KCM request
+// Note: Apple's macOS KCM daemon (based on Heimdal) does NOT use protocol version bytes.
+// The request format is simply: OPCODE (2 bytes big-endian) | DATA
+// This differs from MIT Kerberos KCM client which sends VERSION_MAJOR | VERSION_MINOR | OPCODE | DATA
 func newKCMRequest(opcode kcmOpcode, cacheName string) *kcmRequest {
 	req := &kcmRequest{}
 
-	// Write protocol version and opcode
-	req.buf.WriteByte(kcmProtocolVersionMajor)
-	req.buf.WriteByte(kcmProtocolVersionMinor)
+	// Write opcode only (no version bytes for Heimdal KCM)
 	req.writeUint16(uint16(opcode))
 
 	// Write cache name if provided
