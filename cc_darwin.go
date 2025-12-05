@@ -22,6 +22,10 @@ import (
 
 // KCM Protocol constants
 const (
+	// Protocol version (MIT Kerberos KCM protocol)
+	kcmProtocolVersionMajor = 2
+	kcmProtocolVersionMinor = 0
+
 	// UUID length in bytes
 	kcmUUIDLen = 16
 
@@ -134,9 +138,34 @@ type darwinCCacheHandle struct {
 }
 
 // newPlatformCCache creates a new KCM-based credential cache for macOS
+// On macOS 11+ (Big Sur and later), we try the GSSCred XPC service first,
+// then fall back to the traditional KCM Mach service.
 func newPlatformCCache() (CCache, error) {
 	cc := &darwinCCache{}
 
+	// On macOS 11+, try GSSCred first (XCACHE protocol)
+	if IsMacOS11OrLater() {
+		if debugMode {
+			fmt.Println("DEBUG: macOS 11+ detected, trying GSSCred transport")
+		}
+		gsscred := NewGSSCredTransport()
+		gsscred.SetDebug(debugMode)
+		if err := gsscred.Connect(); err == nil {
+			// GSSCred connected, but we still need KCM for the actual protocol
+			// The GSSCred service provides the credential data differently
+			// For now, let's try KCM first and use GSSCred as metadata source
+			if debugMode {
+				fmt.Println("DEBUG: GSSCred connected, checking for default cache")
+			}
+			if name, err := gsscred.GetDefaultCache(); err == nil {
+				if debugMode {
+					fmt.Printf("DEBUG: GSSCred default cache: %s\n", name)
+				}
+			}
+		}
+	}
+
+	// Use the traditional KCM Mach transport
 	transport := NewMachTransport(defaultKCMMachService)
 	transport.SetDebug(debugMode)
 	if err := transport.Connect(); err != nil {
@@ -444,13 +473,14 @@ func (h *darwinCCacheHandle) RemoveCredential(server types.PrincipalName, server
 }
 
 // newKCMRequest creates a new KCM request
-// Note: Apple's macOS KCM daemon (based on Heimdal) does NOT use protocol version bytes.
-// The request format is simply: OPCODE (2 bytes big-endian) | DATA
-// This differs from MIT Kerberos KCM client which sends VERSION_MAJOR | VERSION_MINOR | OPCODE | DATA
+// The request format follows MIT Kerberos KCM protocol:
+// VERSION_MAJOR (1 byte) | VERSION_MINOR (1 byte) | OPCODE (2 bytes big-endian) | DATA
 func newKCMRequest(opcode kcmOpcode, cacheName string) *kcmRequest {
 	req := &kcmRequest{}
 
-	// Write opcode only (no version bytes for Heimdal KCM)
+	// Write protocol version and opcode
+	req.buf.WriteByte(kcmProtocolVersionMajor)
+	req.buf.WriteByte(kcmProtocolVersionMinor)
 	req.writeUint16(uint16(opcode))
 
 	// Write cache name if provided
