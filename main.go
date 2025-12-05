@@ -8,16 +8,15 @@ import (
 	"time"
 )
 
-
 func main() {
 	var cfg = Config{}
 	flag.StringVar(&cfg.Realm, "realm", "", "realm (e.g. EXAMPLE.COM)")
 	flag.StringVar(&cfg.SPN, "spn", "", "SPN (e.g. HTTP/test.example.com)")
 	flag.StringVar(&cfg.Keytab, "keytab", "", "keytab file (e.g. test.keytab)")
 	flag.StringVar(&cfg.Krb5Config, "krb5config", "", "path to krb5.conf")
-	flag.BoolVar(&cfg.UseCC, "usecc", true, "use credential cache (default: false)")
+	flag.BoolVar(&cfg.UseCC, "usecc", true, "use credential cache")
 	flag.BoolVar(&cfg.ListCreds, "list", false, "list credentials from cache")
-	flag.StringVar(&cfg.CacheName, "cache", "", "credential cache name (default: system default)")
+	flag.StringVar(&cfg.CacheName, "cache", "", "credential cache name")
 	flag.BoolVar(&cfg.Debug, "debug", false, "enable debug output")
 	flag.Parse()
 

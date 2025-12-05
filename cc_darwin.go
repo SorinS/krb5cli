@@ -208,10 +208,26 @@ func (c *darwinCCache) call(req *kcmRequest) (*kcmReply, error) {
 		return nil, fmt.Errorf("no response from credential cache - Kerberos may not be configured on this system")
 	}
 
-	reply := &kcmReply{data: data}
+	// Per MIT Kerberos cc_kcm.c:475-478, the reply data includes a 4-byte
+	// big-endian status code at the beginning, followed by the actual payload.
+	// We must read and check this status code before processing the reply.
+	if len(data) < 4 {
+		return nil, fmt.Errorf("kcm reply too short: %d bytes", len(data))
+	}
 
-	// The reply data doesn't include a status code - that's already handled by the transport
-	// The data here is the actual payload from KCM
+	// Read the KCM status code from the first 4 bytes (big-endian)
+	statusCode := int32(binary.BigEndian.Uint32(data[0:4]))
+
+	if debugMode {
+		fmt.Printf("DEBUG: KCM reply status code: %d (0x%x), payload length: %d\n", statusCode, uint32(statusCode), len(data)-4)
+	}
+
+	if statusCode != 0 {
+		return nil, mapKCMError(statusCode)
+	}
+
+	// Skip the status code, the rest is the actual payload
+	reply := &kcmReply{data: data[4:]}
 
 	return reply, nil
 }
@@ -254,18 +270,27 @@ func mapKCMError(code int32) error {
 
 // GetDefaultCacheName returns the name of the default credential cache
 func (c *darwinCCache) GetDefaultCacheName() (string, error) {
-	// On macOS 11+, prefer the GSSCred-detected cache name
+	// Try KCM protocol first - this gives us a cache name that KCM actually knows about
+	req := newKCMRequest(kcmOpGetDefaultCache, "")
+	reply, err := c.call(req)
+	if err == nil {
+		name, err := reply.readString()
+		if err == nil && name != "" {
+			return name, nil
+		}
+	}
+
+	// If KCM fails but we have a GSSCred cache name, return it as a display name
+	// (Note: This cache name may not work with KCM operations)
 	if c.gsscredCacheName != "" {
 		return c.gsscredCacheName, nil
 	}
 
-	// Fall back to KCM protocol
-	req := newKCMRequest(kcmOpGetDefaultCache, "")
-	reply, err := c.call(req)
+	// If we got an error from KCM and don't have a GSSCred fallback, return the error
 	if err != nil {
 		return "", err
 	}
-	return reply.readString()
+	return "", ErrCacheNotFound
 }
 
 // SetDefaultCache sets the default credential cache
@@ -277,16 +302,14 @@ func (c *darwinCCache) SetDefaultCache(name string) error {
 
 // ListCaches returns a list of available cache names
 func (c *darwinCCache) ListCaches() ([]string, error) {
-	// On macOS 11+, if we have a GSSCred cache name, return it
-	// (KCM protocol typically fails on macOS 11+)
-	if c.gsscredCacheName != "" {
-		return []string{c.gsscredCacheName}, nil
-	}
-
-	// Fall back to KCM protocol
+	// Try KCM protocol first
 	req := newKCMRequest(kcmOpGetCacheUUIDList, "")
 	reply, err := c.call(req)
 	if err != nil {
+		// If KCM fails but we have a GSSCred cache name, return it
+		if c.gsscredCacheName != "" {
+			return []string{c.gsscredCacheName}, nil
+		}
 		return nil, err
 	}
 
