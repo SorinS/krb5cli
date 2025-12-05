@@ -126,8 +126,10 @@ type kcmReply struct {
 
 // darwinCCache implements CCache for macOS using KCM
 type darwinCCache struct {
-	transport kcmTransport
-	mu        sync.Mutex
+	transport        kcmTransport
+	gsscred          *GSSCredTransport
+	gsscredCacheName string // Cache name from GSSCred (macOS 11+)
+	mu               sync.Mutex
 }
 
 // darwinCCacheHandle implements CCacheHandle for macOS using KCM
@@ -151,15 +153,15 @@ func newPlatformCCache() (CCache, error) {
 		gsscred := NewGSSCredTransport()
 		gsscred.SetDebug(debugMode)
 		if err := gsscred.Connect(); err == nil {
-			// GSSCred connected, but we still need KCM for the actual protocol
-			// The GSSCred service provides the credential data differently
-			// For now, let's try KCM first and use GSSCred as metadata source
+			cc.gsscred = gsscred
 			if debugMode {
 				fmt.Println("DEBUG: GSSCred connected, checking for default cache")
 			}
 			if name, err := gsscred.GetDefaultCache(); err == nil {
+				// Store the cache name with API: prefix for consistency with klist
+				cc.gsscredCacheName = "API:" + name
 				if debugMode {
-					fmt.Printf("DEBUG: GSSCred default cache: %s\n", name)
+					fmt.Printf("DEBUG: GSSCred default cache: %s\n", cc.gsscredCacheName)
 				}
 			}
 		}
@@ -252,6 +254,12 @@ func mapKCMError(code int32) error {
 
 // GetDefaultCacheName returns the name of the default credential cache
 func (c *darwinCCache) GetDefaultCacheName() (string, error) {
+	// On macOS 11+, prefer the GSSCred-detected cache name
+	if c.gsscredCacheName != "" {
+		return c.gsscredCacheName, nil
+	}
+
+	// Fall back to KCM protocol
 	req := newKCMRequest(kcmOpGetDefaultCache, "")
 	reply, err := c.call(req)
 	if err != nil {
@@ -269,6 +277,13 @@ func (c *darwinCCache) SetDefaultCache(name string) error {
 
 // ListCaches returns a list of available cache names
 func (c *darwinCCache) ListCaches() ([]string, error) {
+	// On macOS 11+, if we have a GSSCred cache name, return it
+	// (KCM protocol typically fails on macOS 11+)
+	if c.gsscredCacheName != "" {
+		return []string{c.gsscredCacheName}, nil
+	}
+
+	// Fall back to KCM protocol
 	req := newKCMRequest(kcmOpGetCacheUUIDList, "")
 	reply, err := c.call(req)
 	if err != nil {
