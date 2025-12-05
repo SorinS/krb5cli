@@ -25,14 +25,75 @@ func main() {
 	SetDebugMode(cfg.Debug)
 
 	if cfg.ListCreds {
-		if err := listCredentials(cfg.CacheName); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		if cfg.CacheName == "" {
+			// Just list available caches
+			if err := listCaches(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// List credentials from specific cache
+			if err := listCredentials(cfg.CacheName); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		return
 	}
 
 	fmt.Printf("=> configuration: %v\n", cfg)
+}
+
+// listCaches lists all available credential caches
+func listCaches() error {
+	// Create platform-specific credential cache client
+	cc, err := NewCCache()
+	if err != nil {
+		return fmt.Errorf("failed to open credential cache: %w\n\nThis may indicate that the Kerberos credential cache service is not running\nor that you are not logged into a Kerberos realm.", err)
+	}
+	defer cc.Close()
+
+	// Get default cache name
+	defaultCache, err := cc.GetDefaultCacheName()
+	if err != nil {
+		// Not fatal - we can still list caches
+		defaultCache = ""
+	}
+
+	fmt.Println("Credential caches:")
+	fmt.Println()
+
+	if defaultCache != "" {
+		fmt.Printf("  * %s (default)\n", defaultCache)
+	}
+
+	// Try to list all caches
+	caches, err := cc.ListCaches()
+	if err != nil {
+		// If we can't list caches but have a default, that's OK
+		if defaultCache != "" {
+			fmt.Printf("\nTotal: 1 cache(s)\n")
+			return nil
+		}
+		return fmt.Errorf("failed to list caches: %w", err)
+	}
+
+	// Print non-default caches
+	count := 0
+	for _, name := range caches {
+		if name != defaultCache {
+			fmt.Printf("    %s\n", name)
+			count++
+		}
+	}
+
+	if defaultCache != "" {
+		count++
+	}
+
+	fmt.Printf("\nTotal: %d cache(s)\n", count)
+	fmt.Println("\nUse -list -cache <name> to view credentials in a specific cache.")
+	return nil
 }
 
 // listCredentials retrieves and displays credentials from the credential cache
